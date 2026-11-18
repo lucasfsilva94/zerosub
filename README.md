@@ -4,7 +4,7 @@
   # ZeroSub
   *Transforme a aba de Inscrições do YouTube em uma fila estilo Inbox Zero com triagem rápida em cada card.*
 
-  [![Chrome Extension](https://img.shields.io/badge/Chrome_Extension-Manifest_V3-4285F4?style=flat-square&logo=googlechrome&logoColor=white)](https://developer.chrome.com/docs/extensions/develop/migrate/what-is-mv3) [![Version](https://img.shields.io/badge/Version-v1.0.0-CC0000?style=flat-square&logo=youtube&logoColor=white)](https://github.com/lucasfsilva94/ZeroSub) [![JavaScript](https://img.shields.io/badge/JavaScript-ES2022-F7DF1E?style=flat-square&logo=javascript&logoColor=black)](https://developer.mozilla.org/en-US/docs/Web/JavaScript) [![CSS3](https://img.shields.io/badge/CSS3-Dark_%26_Light-1572B6?style=flat-square&logo=css3&logoColor=white)](content/styles.css) [![Node.js Tests](https://img.shields.io/badge/Tests-node_--test-339933?style=flat-square&logo=nodedotjs&logoColor=white)](#-testes-e-qualidade) [![OpenSpec](https://img.shields.io/badge/Workflow-OpenSpec-7C3AED?style=flat-square)](openspec/changes/zerosub-chrome-extension/proposal.md)
+  [![Chrome Extension](https://img.shields.io/badge/Chrome_Extension-Manifest_V3-4285F4?style=flat-square&logo=googlechrome&logoColor=white)](https://developer.chrome.com/docs/extensions/develop/migrate/what-is-mv3) [![Version](https://img.shields.io/badge/Version-v1.0.0-CC0000?style=flat-square&logo=youtube&logoColor=white)](https://github.com/lucasfsilva94/ZeroSub) [![JavaScript](https://img.shields.io/badge/JavaScript-ES2022-F7DF1E?style=flat-square&logo=javascript&logoColor=black)](https://developer.mozilla.org/en-US/docs/Web/JavaScript) [![CSS3](https://img.shields.io/badge/CSS3-Dark_%26_Light-1572B6?style=flat-square&logo=css3&logoColor=white)](content/styles.css) [![Node.js Tests](https://img.shields.io/badge/Tests-node_--test-339933?style=flat-square&logo=nodedotjs&logoColor=white)](#-testes-e-qualidade) [![OpenSpec](https://img.shields.io/badge/Workflow-OpenSpec-7C3AED?style=flat-square)](openspec/specs/)
 
   [Projeto](#-projeto) • [Funcionalidades](#️-funcionalidades) • [Arquitetura](#-arquitetura-e-stack) • [Estrutura](#-estrutura-do-repositório) • [Instalação](#-instalação) • [Fluxo OpenSpec](#-fluxo-spec-driven-openspec) • [Testes](#-testes-e-qualidade)
 </div>
@@ -18,7 +18,7 @@
 Ao instalar a extensão, um **Marco Zero (`installTimestamp`)** é definido automaticamente: todo o histórico antigo fica oculto e apenas vídeos publicados a partir daquele momento entram na sua fila, acompanhados de botões integrados em cada card para **marcar como visto** ou **cancelar a inscrição do canal** sem sair do feed.
 
 > [!NOTE]
-> Especificação técnica completa disponível em [`openspec/changes/zerosub-chrome-extension/`](openspec/changes/zerosub-chrome-extension/): [`proposal.md`](openspec/changes/zerosub-chrome-extension/proposal.md) (escopo e motivação), [`design.md`](openspec/changes/zerosub-chrome-extension/design.md) (decisões arquiteturais Dual-World e InnerTube) e [`specs/`](openspec/changes/zerosub-chrome-extension/specs/) (requisitos por capacidade).
+> Especificação técnica completa disponível em [`openspec/specs/`](openspec/specs/) e histórico da change em [`openspec/changes/archive/2026-11-18-zerosub-chrome-extension/`](openspec/changes/archive/2026-11-18-zerosub-chrome-extension/): [`proposal.md`](openspec/changes/archive/2026-11-18-zerosub-chrome-extension/proposal.md) (escopo e motivação), [`design.md`](openspec/changes/archive/2026-11-18-zerosub-chrome-extension/design.md) (decisões arquiteturais Dual-World e InnerTube) e [`specs/`](openspec/specs/) (requisitos por capacidade).
 
 ---
 
@@ -36,41 +36,6 @@ Ao instalar a extensão, um **Marco Zero (`installTimestamp`)** é definido auto
   - Botão **Zerar Feed Agora / Zerar tudo agora** para redefinir o Marco Zero para o momento atual (`Date.now()`).
   - Botão **Restaurar vídeos ocultos** para recuperar vídeos dispensados manualmente por engano.
 - **Integração Nativa com a SPA do YouTube:** Suporte completo à navegação sem reload (`yt-navigate-finish`), carregamento por rolagem infinita (`MutationObserver` + interceptação de `/youtubei/v1/browse`), parser temporal bilíngue (`PT-BR` e `EN-US`) e temas Claro/Escuro (`html[dark]`).
-
----
-
-## 🧱 Arquitetura e Stack
-
-| Camada | Arquivo / Tecnologia | Papel na Extensão |
-|---|---|---|
-| **Service Worker (MV3)** | [`background.js`](background.js) (`chrome.runtime`, `chrome.storage`, `chrome.action`) | Inicializa o `installTimestamp` e o estado padrão de forma idempotente e atualiza o badge (`99+` / `OFF`). |
-| **Content Script (`MAIN`)** | [`content/injector.js`](content/injector.js) (Web Crypto API, Fetch Hook, InnerTube) | Lê `window.ytInitialData`, intercepta lotes de `/youtubei/v1/browse` e executa `POST /youtubei/v1/subscription/unsubscribe` autenticado via `SAPISIDHASH`. |
-| **Content Script (`ISOLATED`)** | [`content/content.js`](content/content.js) + [`content/styles.css`](content/styles.css) | Gerencia o DOM da SPA, aplica filtros temporais com fallback bilíngue (`PT-BR`/`EN-US`), injeta a barra superior e os botões nos cards e monitora progresso em `/watch`. |
-| **Popup Dashboard** | [`popup/popup.html`](popup/popup.html), [`popup/popup.js`](popup/popup.js), [`popup/popup.css`](popup/popup.css) | Painel rápido com contador de fila, reset do Marco Zero, restauração de vídeos dispensados e toggles em tempo real. |
-| **Suíte de Testes** | [`tests/zerosub.test.js`](tests/zerosub.test.js) (`node:test`, `node:assert`) | Testes automatizados zero-dependency cobrindo manifesto, storage, parser temporal, `SAPISIDHASH`, filtros e UI. |
-
-<details>
-<summary>Esquema de estado em <code>chrome.storage.local</code> e comunicação Dual-World</summary>
-
-### Ponte `MAIN` <-> `ISOLATED` (`ZEROSUB_EVENT`)
-Content scripts no mundo `ISOLATED` têm acesso seguro a `chrome.storage.local`, mas não enxergam variáveis globais da página do YouTube (`window.ytInitialData` e `window.ytcfg`). O ZeroSub opera com dois scripts coordenados via `window.postMessage`:
-1. **`content/injector.js` (`MAIN` world):** extrai `videoId`, `channelId`, `publishedTimeText`, flags de Shorts/Lives e assina chamadas InnerTube com SHA-1 (`SAPISIDHASH`).
-2. **`content/content.js` (`ISOLATED` world):** cruza os metadados recebidos com o parser DOM bilíngue, aplica as regras de visibilidade e sincroniza qualquer alteração entre abas e popup via `chrome.storage.onChanged`.
-
-### Chaves Persistidas (`chrome.storage.local`)
-
-| Chave | Tipo | Padrão | Descrição |
-|---|---|---|---|
-| `installTimestamp` | `number` | `Date.now()` | Timestamp (ms) do Marco Zero atual. |
-| `zeroSubEnabled` | `boolean` | `true` | Ativa o filtro Inbox Zero (`false` exibe todos os vídeos). |
-| `hideShorts` | `boolean` | `true` | Oculta cards e prateleiras de YouTube Shorts. |
-| `hideScheduledLives` | `boolean` | `true` | Oculta lives agendadas e estreias futuras. |
-| `autoMarkWatched` | `boolean` | `true` | Marca vídeos como vistos ao assistir `>= 90%` em `/watch`. |
-| `dismissedVideos` | `string[]` | `[]` | Lista FIFO (máx. 5.000) de `videoId` marcados como vistos. |
-| `unsubscribedChannels` | `string[]` | `[]` | Canais desinscritos na sessão para ocultação imediata no DOM. |
-| `pendingCount` | `number` | `0` | Total de vídeos pendentes visíveis na fila atual. |
-
-</details>
 
 ---
 
@@ -93,12 +58,14 @@ zeroSub/
 │   └── popup.css               # Estilos minimalistas do painel popup
 ├── openspec/
 │   ├── config.yaml             # Configuração do fluxo Spec-Driven
+│   ├── specs/                  # Especificações principais consolidadas (feed-baseline-filtering, video-card-triage, popup-dashboard)
 │   └── changes/
-│       └── zerosub-chrome-extension/
-│           ├── proposal.md     # Proposta de valor, escopo e capacidades
-│           ├── design.md       # Arquitetura técnica e decisões de design
-│           ├── tasks.md        # Plano de implementação verificado
-│           └── specs/          # Especificações detalhadas (feed-baseline-filtering, video-card-triage, popup-dashboard)
+│       └── archive/
+│           └── 2026-11-18-zerosub-chrome-extension/
+│               ├── proposal.md # Proposta de valor, escopo e capacidades
+│               ├── design.md   # Arquitetura técnica e decisões de design
+│               ├── tasks.md    # Plano de implementação verificado
+│               └── specs/      # Delta specs originais da entrega
 ├── tests/
 │   └── zerosub.test.js         # Suíte de testes unitários e de integração (Node.js Test Runner)
 ├── background.js               # Service Worker (Manifest V3): estado inicial e badge de pendentes
@@ -134,15 +101,17 @@ A extensão é escrita em Vanilla JavaScript/CSS sem necessidade de etapa de bui
 
 ## 📋 Fluxo Spec-Driven (OpenSpec)
 
-O projeto utiliza o fluxo **Spec-Driven** com **OpenSpec**, organizando propostas, decisões arquiteturais e especificações comportamentais em [`openspec/`](openspec/):
+O projeto segue o fluxo **Spec-Driven** com o **[OpenSpec](https://github.com/Fission-AI/OpenSpec)**. Toda nova funcionalidade ou alteração comportamental nasce como uma *change* estruturada em [`openspec/changes/`](openspec/changes/) antes de ser implementada e consolidada nas especificações principais em [`openspec/specs/`](openspec/specs/).
 
-| Especificação | Escopo |
-|---|---|
-| [`feed-baseline-filtering`](openspec/changes/zerosub-chrome-extension/specs/feed-baseline-filtering/spec.md) | Inicialização e redefinição do `installTimestamp`, parser bilíngue (`PT-BR`/`EN-US`), suporte a SPA/scroll infinito e filtros de Shorts e lives agendadas. |
-| [`video-card-triage`](openspec/changes/zerosub-chrome-extension/specs/video-card-triage/spec.md) | Barra de ações nos cards, dispensa manual com transição suave, auto-mark ao atingir `>=90%` em `/watch` e desinscrição com confirmação em 2 cliques. |
-| [`popup-dashboard`](openspec/changes/zerosub-chrome-extension/specs/popup-dashboard/spec.md) | Contador de vídeos pendentes, ações rápidas (*Zerar tudo agora*, *Restaurar vídeos ocultos*) e sincronização de toggles em tempo real. |
+### ⚡ Ordem dos Comandos no Fluxo
 
----
+| Ordem | Comando | O que faz | Artefatos / Destino |
+|---|---|---|---|
+| **1** *(opcional)* | `/opsx:explore <tema>` | Modo de exploração e investigação de ideias, problemas e arquitetura antes de abrir uma change formal | Discussão técnica / análise |
+| **2** | `/opsx:propose <descrição>` | Cria a change e gera todos os artefatos de planejamento de uma só vez (`proposal.md`, delta `specs/`, `design.md` e `tasks.md`) | `openspec/changes/<change>/` |
+| **3** | `/opsx:apply` | Executa as tarefas pendentes de `tasks.md` em ordem de dependência, roda as verificações de cada entrega e marca os checkboxes (`- [x]`) em tempo real | Código-fonte + `tasks.md` |
+| **4** | `/opsx:verify` | Audita a implementação contra os artefatos em 3 dimensões (**Completeness**, **Correctness** e **Coherence**), mapeando requisitos, cenários e aderência ao design | Relatório de verificação |
+| **5** | `/opsx:archive` | Valida a conclusão de todos os artefatos e tarefas, sincroniza as *delta specs* em `openspec/specs/` e move a change finalizada para o histórico | `openspec/changes/archive/YYYY-MM-DD-<change>/` |
 
 ## 🧪 Testes e Qualidade
 
