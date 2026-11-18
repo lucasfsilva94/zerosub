@@ -1,0 +1,57 @@
+{
+  "manifest_version": 3,
+  "name": "ZeroSub — YouTube Inbox Zero",
+  "version": "1.0.0",
+  "description": "Transforma a aba de Inscrições do YouTube em uma fila estilo Inbox Zero com triagem rápida por vídeo.",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "permissions": [
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "*://*.youtube.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "ZeroSub — YouTube Inbox Zero",
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.youtube.com/*"
+      ],
+      "js": [
+        "content/injector.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "*://*.youtube.com/*"
+      ],
+      "js": [
+        "content/content.js"
+      ],
+      "css": [
+        "content/styles.css"
+      ],
+      "run_at": "document_idle",
+      "world": "ISOLATED"
+    }
+  ]
+}

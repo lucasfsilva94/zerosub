@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ZeroSub — Dashboard</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="popup-container">
+    <header class="popup-header">
+      <div class="brand">
+        <span class="brand-badge">ZeroSub</span>
+        <span class="brand-subtitle">Inbox Zero para YouTube</span>
+      </div>
+      <span id="baseline-label" class="baseline-label" title="Marco Zero atual">--</span>
+    </header>
+
+    <section class="counter-card">
+      <div id="pending-count" class="counter-value">0</div>
+      <div class="counter-label">vídeos pendentes na fila</div>
+    </section>
+
+    <section class="actions-section">
+      <button type="button" id="btn-reset-now" class="btn btn-primary">
+        Zerar tudo agora
+      </button>
+      <button type="button" id="btn-restore-hidden" class="btn btn-secondary">
+        Restaurar vídeos ocultos (<span id="dismissed-count">0</span>)
+      </button>
+    </section>
+
+    <section class="settings-section">
+      <h2 class="section-title">Configurações</h2>
+
+      <label class="toggle-row" for="toggle-zerosub-enabled">
+        <span>Modo ZeroSub ativo</span>
+        <input type="checkbox" id="toggle-zerosub-enabled" checked />
+      </label>
+
+      <label class="toggle-row" for="toggle-hide-shorts">
+        <span>Ocultar YouTube Shorts</span>
+        <input type="checkbox" id="toggle-hide-shorts" checked />
+      </label>
+
+      <label class="toggle-row" for="toggle-hide-lives">
+        <span>Ocultar lives agendadas/futuras</span>
+        <input type="checkbox" id="toggle-hide-lives" checked />
+      </label>
+
+      <label class="toggle-row" for="toggle-auto-watched">
+        <span>Marcar como visto ao assistir &gt;90%</span>
+        <input type="checkbox" id="toggle-auto-watched" checked />
+      </label>
+    </section>
+
+    <footer id="status-message" class="status-message" aria-live="polite"></footer>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
