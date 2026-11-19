@@ -6,7 +6,11 @@
 
   [![Chrome Extension](https://img.shields.io/badge/Chrome_Extension-Manifest_V3-4285F4?style=flat-square&logo=googlechrome&logoColor=white)](https://developer.chrome.com/docs/extensions/develop/migrate/what-is-mv3) [![Version](https://img.shields.io/badge/Version-v1.0.0-CC0000?style=flat-square&logo=youtube&logoColor=white)](https://github.com/lucasfsilva94/ZeroSub) [![JavaScript](https://img.shields.io/badge/JavaScript-ES2022-F7DF1E?style=flat-square&logo=javascript&logoColor=black)](https://developer.mozilla.org/en-US/docs/Web/JavaScript) [![CSS3](https://img.shields.io/badge/CSS3-Dark_%26_Light-1572B6?style=flat-square&logo=css3&logoColor=white)](content/styles.css) [![Node.js Tests](https://img.shields.io/badge/Tests-node_--test-339933?style=flat-square&logo=nodedotjs&logoColor=white)](#-testes-e-qualidade)
 
-  [Projeto](#-projeto) • [Funcionalidades](#️-funcionalidades) • [Arquitetura](#-arquitetura-e-stack) • [Estrutura](#-estrutura-do-repositório) • [Instalação](#-instalação) • [Fluxo OpenSpec](#-fluxo-spec-driven-openspec) • [Testes](#-testes-e-qualidade)
+  [Projeto](#-projeto) • [Funcionalidades](#️-funcionalidades) • [Estrutura](#-estrutura-do-repositório) • [Instalação](#-instalação) • [Fluxo OpenSpec](#-fluxo-spec-driven-openspec) • [Testes](#-testes-e-qualidade)
+
+  <br />
+
+  <img src="docs/zerosub-demo.webp" alt="ZeroSub — Demonstração da extensão Inbox Zero para o YouTube" width="100%" />
 </div>
 
 ---
