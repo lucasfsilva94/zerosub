@@ -53,6 +53,54 @@
   }
 
   /**
+   * Retorna os canais elegíveis para sugestão de desinscrição (>= 3 vídeos distintos sem interesse).
+   * @param {Record<string, any>} notInterestedByChannel
+   * @param {string[]} unsubscribedChannels
+   * @param {number} [threshold=3]
+   */
+  function getPopupSuggestions(notInterestedByChannel = {}, unsubscribedChannels = [], threshold = 3) {
+    const unsubSet = new Set(Array.isArray(unsubscribedChannels) ? unsubscribedChannels : []);
+    return Object.values(notInterestedByChannel || {})
+      .filter((entry) => {
+        if (!entry || !Array.isArray(entry.videoIds) || entry.videoIds.length < threshold) {
+          return false;
+        }
+        if (
+          (entry.channelKey && unsubSet.has(entry.channelKey)) ||
+          (entry.channelId && unsubSet.has(entry.channelId)) ||
+          (entry.channelHandle && unsubSet.has(entry.channelHandle))
+        ) {
+          return false;
+        }
+        return true;
+      })
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  }
+
+  /**
+   * Remove um canal de notInterestedByChannel no storage ("Manter canal").
+   * @param {chrome.storage.StorageArea} storageArea
+   * @param {{ channelKey?: string, channelId?: string, channelHandle?: string }} channelInfo
+   */
+  async function keepChannelInStorage(storageArea, channelInfo) {
+    const data = await storageArea.get(['notInterestedByChannel']);
+    const updatedMap = { ...(data.notInterestedByChannel || {}) };
+
+    for (const [k, entry] of Object.entries(updatedMap)) {
+      const matches =
+        (channelInfo.channelKey && (k === channelInfo.channelKey || (entry && entry.channelKey === channelInfo.channelKey))) ||
+        (channelInfo.channelId && entry && entry.channelId === channelInfo.channelId) ||
+        (channelInfo.channelHandle && entry && entry.channelHandle === channelInfo.channelHandle);
+      if (matches) {
+        delete updatedMap[k];
+      }
+    }
+
+    await storageArea.set({ notInterestedByChannel: updatedMap });
+    return updatedMap;
+  }
+
+  /**
    * Inicializa a interface do popup quando executado no navegador.
    */
   async function setupPopupDOM() {
@@ -64,6 +112,10 @@
     const dismissedCountEl = document.getElementById('dismissed-count');
     const baselineLabelEl = document.getElementById('baseline-label');
     const statusMessageEl = document.getElementById('status-message');
+
+    const suggestionsSectionEl = document.getElementById('suggestions-section');
+    const suggestionsBadgeEl = document.getElementById('suggestions-badge');
+    const suggestionsListEl = document.getElementById('suggestions-list');
 
     const btnResetNow = document.getElementById('btn-reset-now');
     const btnRestoreHidden = document.getElementById('btn-restore-hidden');
@@ -85,6 +137,114 @@
       }, 2500);
     }
 
+    async function triggerPopupUnsubscribe(entry) {
+      let sentToYouTubeTab = false;
+
+      if (chrome.tabs && chrome.tabs.query) {
+        const tabs = await new Promise((resolve) => {
+          chrome.tabs.query({ url: '*://*.youtube.com/*' }, (found) => resolve(found || []));
+        });
+
+        const targetTab =
+          tabs.find((t) => t.url && t.url.includes('/feed/subscriptions')) || tabs[0];
+
+        if (targetTab && targetTab.id) {
+          sentToYouTubeTab = await new Promise((resolve) => {
+            chrome.tabs.sendMessage(
+              targetTab.id,
+              { type: 'ZEROSUB_UNSUBSCRIBE_CHANNEL', channelInfo: entry },
+              (resp) => {
+                if (chrome.runtime.lastError) {
+                  resolve(false);
+                } else {
+                  resolve(Boolean(resp && resp.ok));
+                }
+              }
+            );
+          });
+        }
+      }
+
+      if (!sentToYouTubeTab) {
+        // Fallback: oculta o canal localmente e limpa a sugestão
+        const data = await chrome.storage.local.get(['unsubscribedChannels']);
+        const unsubSet = new Set(Array.isArray(data.unsubscribedChannels) ? data.unsubscribedChannels : []);
+        if (entry.channelId) unsubSet.add(entry.channelId);
+        if (entry.channelHandle) unsubSet.add(entry.channelHandle);
+        if (entry.channelKey) unsubSet.add(entry.channelKey);
+        await chrome.storage.local.set({ unsubscribedChannels: Array.from(unsubSet) });
+        await keepChannelInStorage(chrome.storage.local, entry);
+      }
+
+      await refreshUI();
+      showFeedback(`Canal "${entry.channelName || entry.channelKey}" removido!`);
+    }
+
+    function renderSuggestions(suggestions) {
+      if (!suggestionsSectionEl || !suggestionsListEl) return;
+
+      if (!suggestions || suggestions.length === 0) {
+        suggestionsSectionEl.hidden = true;
+        suggestionsListEl.innerHTML = '';
+        return;
+      }
+
+      suggestionsSectionEl.hidden = false;
+      if (suggestionsBadgeEl) {
+        suggestionsBadgeEl.textContent = String(suggestions.length);
+      }
+
+      suggestionsListEl.innerHTML = '';
+      suggestions.forEach((entry) => {
+        const row = document.createElement('div');
+        row.className = 'suggestion-row';
+
+        const info = document.createElement('div');
+        info.className = 'suggestion-info';
+
+        const nameEl = document.createElement('span');
+        nameEl.className = 'suggestion-name';
+        nameEl.textContent = entry.channelName || entry.channelHandle || entry.channelKey;
+
+        const countEl = document.createElement('span');
+        countEl.className = 'suggestion-count';
+        countEl.textContent = `${entry.videoIds.length} vídeos sem interesse`;
+
+        info.appendChild(nameEl);
+        info.appendChild(countEl);
+
+        const actions = document.createElement('div');
+        actions.className = 'suggestion-actions';
+
+        const keepBtn = document.createElement('button');
+        keepBtn.type = 'button';
+        keepBtn.className = 'btn-mini btn-mini-keep';
+        keepBtn.textContent = 'Manter';
+        keepBtn.title = 'Manter canal e zerar contador';
+        keepBtn.addEventListener('click', async () => {
+          await keepChannelInStorage(chrome.storage.local, entry);
+          await refreshUI();
+          showFeedback('Canal mantido');
+        });
+
+        const unsubBtn = document.createElement('button');
+        unsubBtn.type = 'button';
+        unsubBtn.className = 'btn-mini btn-mini-unsub';
+        unsubBtn.textContent = 'Desinscrever';
+        unsubBtn.addEventListener('click', async () => {
+          unsubBtn.disabled = true;
+          await triggerPopupUnsubscribe(entry);
+        });
+
+        actions.appendChild(keepBtn);
+        actions.appendChild(unsubBtn);
+
+        row.appendChild(info);
+        row.appendChild(actions);
+        suggestionsListEl.appendChild(row);
+      });
+    }
+
     async function refreshUI() {
       const data = await chrome.storage.local.get([
         'installTimestamp',
@@ -93,6 +253,8 @@
         'hideScheduledLives',
         'autoMarkWatched',
         'dismissedVideos',
+        'unsubscribedChannels',
+        'notInterestedByChannel',
         'pendingCount'
       ]);
 
@@ -111,6 +273,12 @@
       if (toggleHideShorts) toggleHideShorts.checked = data.hideShorts !== false;
       if (toggleHideLives) toggleHideLives.checked = data.hideScheduledLives !== false;
       if (toggleAutoWatched) toggleAutoWatched.checked = data.autoMarkWatched !== false;
+
+      const suggestions = getPopupSuggestions(
+        data.notInterestedByChannel,
+        data.unsubscribedChannels
+      );
+      renderSuggestions(suggestions);
     }
 
     // Tenta consultar a aba ativa caso seja /feed/subscriptions para obter contagem em tempo real
@@ -193,13 +361,17 @@
     module.exports = {
       resetZeroSubQueue,
       restoreDismissedVideos,
-      formatBaselineTimestamp
+      formatBaselineTimestamp,
+      getPopupSuggestions,
+      keepChannelInStorage
     };
   } else if (rootScope) {
     rootScope.ZeroSubPopup = {
       resetZeroSubQueue,
       restoreDismissedVideos,
-      formatBaselineTimestamp
+      formatBaselineTimestamp,
+      getPopupSuggestions,
+      keepChannelInStorage
     };
   }
 })(typeof globalThis !== 'undefined' ? globalThis : this);

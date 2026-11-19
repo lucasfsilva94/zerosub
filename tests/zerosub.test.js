@@ -16,10 +16,15 @@ const {
 } = require('../content/injector.js');
 
 const {
+  NOT_INTERESTED_THRESHOLD,
   parseRelativeTime,
   extractVideoIdFromHref,
   isScheduledLiveText,
   evaluateCardVisibility,
+  evaluateFeedItems,
+  recordNotInterestedVideo,
+  getUnsubscribeSuggestions,
+  removeChannelFromNotInterested,
   shouldAutoMarkWatched,
   appendDismissedVideo,
   createTwoStepConfirmation
@@ -28,7 +33,9 @@ const {
 const {
   resetZeroSubQueue,
   restoreDismissedVideos,
-  formatBaselineTimestamp
+  formatBaselineTimestamp,
+  getPopupSuggestions,
+  keepChannelInStorage
 } = require('../popup/popup.js');
 
 test('1.1 manifest.json é um JSON Manifest V3 válido com scripts e permissões exigidos', () => {
@@ -459,6 +466,157 @@ test('5.1 popup/popup.html, popup.css e popup.js possuem os controles exigidos e
   assert.deepEqual(store.dismissedVideos, []);
   assert.ok(formatBaselineTimestamp(newNow).length >= 5);
 });
+
+test('6.1 background.js inicializa baselineAnchorIds e notInterestedByChannel sem sobrescrever existentes', () => {
+  const patch = buildInitialStatePatch({}, 1763590000000);
+  assert.deepEqual(patch.baselineAnchorIds, []);
+  assert.deepEqual(patch.notInterestedByChannel, {});
+
+  const existing = {
+    installTimestamp: 1000,
+    baselineAnchorIds: ['anchor_1'],
+    notInterestedByChannel: { UC1: { videoIds: ['v1'] } }
+  };
+  const updatePatch = buildInitialStatePatch(existing, 2000);
+  assert.equal(updatePatch.baselineAnchorIds, undefined);
+  assert.equal(updatePatch.notInterestedByChannel, undefined);
+});
+
+test('6.2 evaluateFeedItems aplica corte cronológico por baselineAnchorIds e oculta continuation para impedir vídeos antigos', () => {
+  const baseline = 1763590000000;
+  const state = {
+    installTimestamp: baseline,
+    zeroSubEnabled: true,
+    hideShorts: true,
+    hideScheduledLives: true,
+    dismissedVideos: new Set(),
+    unsubscribedChannels: new Set(),
+    baselineAnchorIds: new Set(['vid_anchor'])
+  };
+
+  const feed = [
+    { videoId: 'vid_new_1', publishedTimestamp: baseline + 120000, isShort: false, isUpcoming: false },
+    { videoId: 'vid_anchor', publishedTimestamp: baseline + 10000, isShort: false, isUpcoming: false },
+    // Card abaixo do corte mesmo sem publishedTimestamp deve ser ocultado!
+    { videoId: 'vid_old_no_ts', publishedTimestamp: null, isShort: false, isUpcoming: false }
+  ];
+
+  const result = evaluateFeedItems(feed, state);
+  assert.equal(result.visibleCount, 1);
+  assert.equal(result.cutoffReached, true);
+  assert.equal(result.shouldHideContinuation, true);
+  assert.deepEqual(result.decisions[0], { hidden: false, reason: null });
+  assert.deepEqual(result.decisions[1], { hidden: true, reason: 'baseline-anchor' });
+  assert.deepEqual(result.decisions[2], { hidden: true, reason: 'after-cutoff' });
+
+  // No modo Mostrar todos, desativa corte e reexibe continuation
+  const showAll = evaluateFeedItems(feed, { ...state, zeroSubEnabled: false });
+  assert.equal(showAll.visibleCount, 3);
+  assert.equal(showAll.shouldHideContinuation, false);
+});
+
+test('6.3 recordNotInterestedVideo deduplica videoIds e sugere desinscrição ao atingir 3 vídeos diferentes do mesmo canal', () => {
+  assert.equal(NOT_INTERESTED_THRESHOLD, 3);
+  let map = {};
+
+  const r1 = recordNotInterestedVideo(map, {
+    channelKey: 'UC_CH1',
+    channelId: 'UC_CH1',
+    channelHandle: '/@ch1',
+    channelName: 'Canal 1',
+    videoId: 'v1'
+  }, 100);
+  map = r1.updatedMap;
+  assert.equal(r1.count, 1);
+  assert.equal(r1.reachedThreshold, false);
+
+  // Mesmo vídeo repetido não deve incrementar contagem
+  const r1Dup = recordNotInterestedVideo(map, {
+    channelKey: 'UC_CH1',
+    channelId: 'UC_CH1',
+    channelName: 'Canal 1',
+    videoId: 'v1'
+  }, 150);
+  map = r1Dup.updatedMap;
+  assert.equal(r1Dup.count, 1);
+  assert.equal(r1Dup.reachedThreshold, false);
+
+  const r2 = recordNotInterestedVideo(map, {
+    channelKey: 'UC_CH1',
+    channelId: 'UC_CH1',
+    channelName: 'Canal 1',
+    videoId: 'v2'
+  }, 200);
+  map = r2.updatedMap;
+  assert.equal(r2.count, 2);
+  assert.equal(r2.reachedThreshold, false);
+  assert.equal(getUnsubscribeSuggestions(map, []).length, 0);
+
+  // Terceiro vídeo distinto atinge threshold de 3
+  const r3 = recordNotInterestedVideo(map, {
+    channelKey: 'UC_CH1',
+    channelId: 'UC_CH1',
+    channelName: 'Canal 1',
+    videoId: 'v3'
+  }, 300);
+  map = r3.updatedMap;
+  assert.equal(r3.count, 3);
+  assert.equal(r3.reachedThreshold, true);
+
+  const suggestions = getUnsubscribeSuggestions(map, []);
+  assert.equal(suggestions.length, 1);
+  assert.equal(suggestions[0].channelName, 'Canal 1');
+
+  // Se o canal já foi desinscrito, não aparece mais nas sugestões
+  assert.equal(getUnsubscribeSuggestions(map, ['UC_CH1']).length, 0);
+
+  // Ao clicar em "Manter canal", remove o canal do mapa
+  const cleaned = removeChannelFromNotInterested(map, { channelKey: 'UC_CH1' });
+  assert.equal(getUnsubscribeSuggestions(cleaned, []).length, 0);
+});
+
+test('6.4 styles.css e popup suportam novo rodapé de 3 botões em linha única, Inbox Zero e seção de sugestões sincronizada', async () => {
+  const cssContent = fs.readFileSync(path.join(__dirname, '..', 'content', 'styles.css'), 'utf8');
+  assert.ok(cssContent.includes('.zerosub-card-managed'));
+  assert.ok(cssContent.includes('.zerosub-btn-not-interested'));
+  assert.ok(cssContent.includes('.zerosub-empty-state'));
+  assert.ok(cssContent.includes('.zerosub-suggestions-panel'));
+
+  const popupHtml = fs.readFileSync(path.join(__dirname, '..', 'popup', 'popup.html'), 'utf8');
+  assert.ok(popupHtml.includes('id="suggestions-section"'));
+  assert.ok(popupHtml.includes('id="suggestions-list"'));
+
+  let store = {
+    notInterestedByChannel: {
+      UC_X: {
+        channelKey: 'UC_X',
+        channelId: 'UC_X',
+        channelName: 'Canal X',
+        videoIds: ['a', 'b', 'c'],
+        updatedAt: 500
+      }
+    }
+  };
+
+  const mockStorage = {
+    async get(keys) {
+      const res = {};
+      for (const k of keys) res[k] = store[k];
+      return res;
+    },
+    async set(obj) {
+      store = { ...store, ...obj };
+    }
+  };
+
+  const suggestions = getPopupSuggestions(store.notInterestedByChannel, []);
+  assert.equal(suggestions.length, 1);
+  assert.equal(suggestions[0].channelKey, 'UC_X');
+
+  await keepChannelInStorage(mockStorage, { channelKey: 'UC_X' });
+  assert.equal(getPopupSuggestions(store.notInterestedByChannel, []).length, 0);
+});
+
 
 
 

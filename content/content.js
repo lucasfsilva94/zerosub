@@ -13,7 +13,9 @@
   const MAIN_SOURCE = 'ZEROSUB_MAIN';
   const ISOLATED_SOURCE = 'ZEROSUB_ISOLATED';
   const MAX_DISMISSED_VIDEOS = 5000;
+  const MAX_BASELINE_ANCHORS = 30;
   const CONFIRM_TIMEOUT_MS = 4000;
+  const NOT_INTERESTED_THRESHOLD = 3;
 
   const UNIT_TO_MS = {
     second: 1000,
@@ -247,6 +249,159 @@
   }
 
   /**
+   * Avalia uma lista ordenada de cards (do topo para baixo no feed cronológico de inscrições),
+   * aplicando corte cronológico (cutoff) assim que um vídeo âncora (baselineAnchorIds) ou
+   * anterior a installTimestamp é encontrado, ocultando tudo abaixo dele e sinalizando o bloqueio
+   * da paginação infinita do YouTube no Modo ZeroSub.
+   *
+   * @param {Array<Parameters<typeof evaluateCardVisibility>[0]>} cardsMeta
+   * @param {Parameters<typeof evaluateCardVisibility>[1] & { baselineAnchorIds?: Set<string> | string[] }} state
+   */
+  function evaluateFeedItems(cardsMeta, state) {
+    const anchorSet =
+      state.baselineAnchorIds instanceof Set
+        ? state.baselineAnchorIds
+        : new Set(state.baselineAnchorIds || []);
+
+    let cutoffReached = false;
+    let visibleCount = 0;
+    const decisions = [];
+
+    for (const cardMeta of cardsMeta) {
+      if (state.zeroSubEnabled) {
+        if (cutoffReached) {
+          decisions.push({ hidden: true, reason: 'after-cutoff' });
+          continue;
+        }
+
+        if (cardMeta.videoId && anchorSet.has(cardMeta.videoId)) {
+          cutoffReached = true;
+          decisions.push({ hidden: true, reason: 'baseline-anchor' });
+          continue;
+        }
+      }
+
+      const decision = evaluateCardVisibility(cardMeta, state);
+      if (state.zeroSubEnabled && decision.reason === 'before-baseline') {
+        cutoffReached = true;
+      }
+
+      if (!decision.hidden) {
+        visibleCount++;
+      }
+      decisions.push(decision);
+    }
+
+    const shouldHideContinuation = Boolean(
+      state.zeroSubEnabled && (cutoffReached || (visibleCount === 0 && anchorSet.size > 0))
+    );
+
+    return {
+      decisions,
+      visibleCount,
+      cutoffReached,
+      shouldHideContinuation
+    };
+  }
+
+  /**
+   * Registra um vídeo marcado como "Não tenho interesse" em um mapa deduplicado por canal.
+   *
+   * @param {Record<string, { channelKey: string, channelId: string, channelHandle: string, channelName: string, videoIds: string[], updatedAt: number }>} currentMap
+   * @param {{ channelKey?: string, channelId?: string, channelHandle?: string, channelName?: string, videoId: string }} info
+   * @param {number} [now=Date.now()]
+   * @param {number} [threshold=NOT_INTERESTED_THRESHOLD]
+   */
+  function recordNotInterestedVideo(
+    currentMap = {},
+    info = {},
+    now = Date.now(),
+    threshold = NOT_INTERESTED_THRESHOLD
+  ) {
+    const key = info.channelKey || info.channelId || info.channelHandle || info.channelName || '';
+    const updatedMap = { ...(currentMap || {}) };
+
+    if (!key || !info.videoId) {
+      return { updatedMap, entry: null, count: 0, reachedThreshold: false };
+    }
+
+    const prev = updatedMap[key];
+    const prevIds = prev && Array.isArray(prev.videoIds) ? prev.videoIds : [];
+    const prevCount = prevIds.length;
+    const nextIds = prevIds.includes(info.videoId) ? [...prevIds] : [...prevIds, info.videoId];
+
+    const entry = {
+      channelKey: key,
+      channelId: info.channelId || (prev && prev.channelId) || '',
+      channelHandle: info.channelHandle || (prev && prev.channelHandle) || '',
+      channelName: info.channelName || (prev && prev.channelName) || info.channelHandle || key,
+      videoIds: nextIds,
+      updatedAt: now
+    };
+
+    updatedMap[key] = entry;
+    const count = nextIds.length;
+    const reachedThreshold = prevCount < threshold && count >= threshold;
+
+    return { updatedMap, entry, count, reachedThreshold };
+  }
+
+  /**
+   * Retorna os canais elegíveis para sugestão de desinscrição (>= threshold vídeos distintos)
+   * que ainda não foram desinscritos.
+   *
+   * @param {Record<string, any>} notInterestedMap
+   * @param {Set<string> | string[]} unsubscribedChannels
+   * @param {number} [threshold=NOT_INTERESTED_THRESHOLD]
+   */
+  function getUnsubscribeSuggestions(
+    notInterestedMap = {},
+    unsubscribedChannels = [],
+    threshold = NOT_INTERESTED_THRESHOLD
+  ) {
+    const unsubSet =
+      unsubscribedChannels instanceof Set
+        ? unsubscribedChannels
+        : new Set(unsubscribedChannels || []);
+
+    return Object.values(notInterestedMap || {})
+      .filter((entry) => {
+        if (!entry || !Array.isArray(entry.videoIds) || entry.videoIds.length < threshold) {
+          return false;
+        }
+        if (
+          (entry.channelKey && unsubSet.has(entry.channelKey)) ||
+          (entry.channelId && unsubSet.has(entry.channelId)) ||
+          (entry.channelHandle && unsubSet.has(entry.channelHandle))
+        ) {
+          return false;
+        }
+        return true;
+      })
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  }
+
+  /**
+   * Remove um canal do mapa de desinteresse (usado ao clicar em "Manter canal" ou após "Desinscrever").
+   *
+   * @param {Record<string, any>} currentMap
+   * @param {{ channelKey?: string, channelId?: string, channelHandle?: string }} info
+   */
+  function removeChannelFromNotInterested(currentMap = {}, info = {}) {
+    const updatedMap = { ...(currentMap || {}) };
+    for (const [k, entry] of Object.entries(updatedMap)) {
+      const matches =
+        (info.channelKey && (k === info.channelKey || (entry && entry.channelKey === info.channelKey))) ||
+        (info.channelId && entry && entry.channelId === info.channelId) ||
+        (info.channelHandle && entry && entry.channelHandle === info.channelHandle);
+      if (matches) {
+        delete updatedMap[k];
+      }
+    }
+    return updatedMap;
+  }
+
+  /**
    * Verifica se o progresso de reprodução atingiu >= 90% para marcação automática como visto.
    *
    * @param {number} currentTime Segundos atuais
@@ -360,6 +515,9 @@
     autoMarkWatched: true,
     dismissedVideos: new Set(),
     unsubscribedChannels: new Set(),
+    baselineAnchorIds: new Set(),
+    notInterestedByChannel: {},
+    suggestionsPanelOpen: false,
     pendingCount: 0,
     loaded: false
   };
@@ -385,6 +543,8 @@
       'autoMarkWatched',
       'dismissedVideos',
       'unsubscribedChannels',
+      'baselineAnchorIds',
+      'notInterestedByChannel',
       'pendingCount'
     ]);
 
@@ -405,6 +565,13 @@
     runtimeState.unsubscribedChannels = new Set(
       Array.isArray(data.unsubscribedChannels) ? data.unsubscribedChannels : []
     );
+    runtimeState.baselineAnchorIds = new Set(
+      Array.isArray(data.baselineAnchorIds) ? data.baselineAnchorIds : []
+    );
+    runtimeState.notInterestedByChannel =
+      data.notInterestedByChannel && typeof data.notInterestedByChannel === 'object'
+        ? data.notInterestedByChannel
+        : {};
     runtimeState.loaded = true;
   }
 
@@ -529,11 +696,14 @@
       }
     }
 
+    const channelName = (cached && cached.channelName) || domChannelName || channelHandle || channelKey;
+
     return {
       videoId,
       channelId,
       channelHandle,
       channelKey,
+      channelName,
       publishedTimestamp,
       isShort,
       isUpcoming,
@@ -566,6 +736,61 @@
   }
 
   /**
+   * Marca um vídeo como "Não tenho interesse", dispensa o card e contabiliza por canal.
+   * Ao atingir 3 vídeos distintos do mesmo canal, adiciona o canal na lista de sugestões.
+   * @param {ReturnType<typeof inspectCardElement>} cardMeta
+   * @param {Element} cardEl
+   */
+  async function markVideoNotInterested(cardMeta, cardEl) {
+    if (!cardMeta || !cardMeta.videoId) return;
+
+    await dismissVideoCard(cardMeta.videoId, cardEl);
+
+    const { updatedMap, entry, count, reachedThreshold } = recordNotInterestedVideo(
+      runtimeState.notInterestedByChannel,
+      cardMeta
+    );
+    runtimeState.notInterestedByChannel = updatedMap;
+
+    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+      await chrome.storage.local.set({ notInterestedByChannel: updatedMap });
+    }
+
+    updateToolbarUI();
+    renderSuggestionsPanel();
+
+    if (reachedThreshold && entry) {
+      showZeroSubToast(
+        `Você marcou ${count} vídeos de "${entry.channelName}" como sem interesse. Confira as Sugestões para desinscrever.`
+      );
+    } else if (entry && count < NOT_INTERESTED_THRESHOLD) {
+      showZeroSubToast(
+        `Sem interesse registrado (${count}/${NOT_INTERESTED_THRESHOLD} para sugerir desinscrição de ${entry.channelName}).`
+      );
+    }
+  }
+
+  /**
+   * Remove um canal da lista de sugestões zerando seu histórico de desinteresse ("Manter canal").
+   * @param {{ channelKey?: string, channelId?: string, channelHandle?: string, channelName?: string }} channelInfo
+   */
+  async function keepSuggestedChannel(channelInfo) {
+    const updatedMap = removeChannelFromNotInterested(
+      runtimeState.notInterestedByChannel,
+      channelInfo
+    );
+    runtimeState.notInterestedByChannel = updatedMap;
+
+    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+      await chrome.storage.local.set({ notInterestedByChannel: updatedMap });
+    }
+
+    updateToolbarUI();
+    renderSuggestionsPanel();
+    showZeroSubToast(`Canal "${channelInfo.channelName || channelInfo.channelKey}" mantido.`);
+  }
+
+  /**
    * Solicita ao MAIN world (injector.js) o cancelamento da inscrição via InnerTube API.
    * Caso falhe, executa fallback UI abrindo/acionando o canal ou notificando o usuário.
    *
@@ -574,14 +799,21 @@
    */
   async function handleConfirmedUnsubscribe(channelInfo, buttonEl) {
     const { channelId, channelHandle, channelKey } = channelInfo;
-    buttonEl.disabled = true;
-    buttonEl.textContent = 'Cancelando...';
-    buttonEl.classList.remove('zerosub-btn-confirming');
+    if (buttonEl) {
+      buttonEl.disabled = true;
+      buttonEl.textContent = 'Cancelando...';
+      buttonEl.classList.remove('zerosub-btn-confirming');
+    }
 
-    // Oculta imediatamente todos os cards desse canal na tela
+    // Oculta imediatamente todos os cards desse canal na tela e limpa da lista de sugestões
     if (channelId) runtimeState.unsubscribedChannels.add(channelId);
     if (channelHandle) runtimeState.unsubscribedChannels.add(channelHandle);
     if (channelKey) runtimeState.unsubscribedChannels.add(channelKey);
+
+    runtimeState.notInterestedByChannel = removeChannelFromNotInterested(
+      runtimeState.notInterestedByChannel,
+      channelInfo
+    );
 
     if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
       const stored = await chrome.storage.local.get(['unsubscribedChannels']);
@@ -589,10 +821,15 @@
       if (channelId) list.add(channelId);
       if (channelHandle) list.add(channelHandle);
       if (channelKey) list.add(channelKey);
-      await chrome.storage.local.set({ unsubscribedChannels: Array.from(list) });
+      await chrome.storage.local.set({
+        unsubscribedChannels: Array.from(list),
+        notInterestedByChannel: runtimeState.notInterestedByChannel
+      });
     }
 
     hideAllCardsForChannel(channelKey, channelId, channelHandle);
+    updateToolbarUI();
+    renderSuggestionsPanel();
 
     // Envia comando para o MAIN world executar o POST /youtubei/v1/subscription/unsubscribe
     const apiResult = await requestMainWorldUnsubscribe(channelId, channelHandle);
@@ -600,6 +837,7 @@
       // Fallback UI: tenta acionar fluxo via iframe/página do canal ou avisa no banner
       triggerUnsubscribeFallback(channelId, channelHandle);
     }
+    return apiResult;
   }
 
   /**
@@ -720,7 +958,21 @@
       dismissVideoCard(latestMeta.videoId, cardEl);
     });
 
-    // 2. Botão "Desinscrever" com confirmação em duas etapas
+    // 2. Botão "Não tenho interesse" (Sem interesse)
+    const notInterestedBtn = document.createElement('button');
+    notInterestedBtn.type = 'button';
+    notInterestedBtn.className = 'zerosub-btn zerosub-btn-not-interested';
+    notInterestedBtn.title = 'Não tenho interesse (3 vídeos diferentes do mesmo canal sugerem desinscrição)';
+    notInterestedBtn.innerHTML = '<span class="zerosub-icon">✕</span><span>Sem interesse</span>';
+
+    notInterestedBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const latestMeta = inspectCardElement(cardEl);
+      markVideoNotInterested(latestMeta, cardEl);
+    });
+
+    // 3. Botão "Desinscrever" com confirmação em duas etapas
     const unsubBtn = document.createElement('button');
     unsubBtn.type = 'button';
     unsubBtn.className = 'zerosub-btn zerosub-btn-unsub';
@@ -750,15 +1002,11 @@
     });
 
     actionBar.appendChild(markSeenBtn);
+    actionBar.appendChild(notInterestedBtn);
     actionBar.appendChild(unsubBtn);
 
-    const detailsContainer =
-      cardEl.querySelector('#dismissible') ||
-      cardEl.querySelector('ytd-rich-grid-media') ||
-      cardEl.querySelector('.yt-lockup-view-model') ||
-      cardEl;
-
-    detailsContainer.appendChild(actionBar);
+    // Anexa diretamente no cardEl (abaixo de #content) para garantir empilhamento vertical 100% abaixo do vídeo
+    cardEl.appendChild(actionBar);
   }
 
   /**
@@ -782,6 +1030,7 @@
           <span id="zerosub-toolbar-status" class="zerosub-toolbar-status"></span>
         </div>
         <div class="zerosub-toolbar-actions">
+          <button type="button" id="zerosub-suggestions-toggle-btn" class="zerosub-toolbar-btn zerosub-toolbar-btn-suggestions zerosub-hidden"></button>
           <button type="button" id="zerosub-toggle-mode-btn" class="zerosub-toolbar-btn"></button>
           <button type="button" id="zerosub-reset-now-btn" class="zerosub-toolbar-btn zerosub-toolbar-btn-primary">
             Zerar Feed Agora
@@ -796,8 +1045,16 @@
 
       targetParent.insertBefore(toolbar, targetParent.firstChild);
 
+      const suggestionsBtn = toolbar.querySelector('#zerosub-suggestions-toggle-btn');
       const toggleBtn = toolbar.querySelector('#zerosub-toggle-mode-btn');
       const resetBtn = toolbar.querySelector('#zerosub-reset-now-btn');
+
+      if (suggestionsBtn) {
+        suggestionsBtn.addEventListener('click', () => {
+          runtimeState.suggestionsPanelOpen = !runtimeState.suggestionsPanelOpen;
+          renderSuggestionsPanel();
+        });
+      }
 
       toggleBtn.addEventListener('click', async () => {
         const nextMode = !runtimeState.zeroSubEnabled;
@@ -814,41 +1071,140 @@
     }
 
     updateToolbarUI();
+    renderSuggestionsPanel();
   }
 
   /**
-   * Redefine o installTimestamp para Date.now() e dispensa os vídeos atualmente renderizados na fila
-   * para garantir que o feed fique 100% zerado imediatamente.
+   * Renderiza o painel expansível de sugestões de desinscrição logo abaixo da barra do ZeroSub.
+   */
+  function renderSuggestionsPanel() {
+    if (typeof document === 'undefined' || !isSubscriptionsPage()) return;
+    const toolbar = document.getElementById('zerosub-top-toolbar');
+    if (!toolbar || !toolbar.parentNode) return;
+
+    const suggestions = getUnsubscribeSuggestions(
+      runtimeState.notInterestedByChannel,
+      runtimeState.unsubscribedChannels
+    );
+
+    let panel = document.getElementById('zerosub-suggestions-panel');
+    if (suggestions.length === 0 || !runtimeState.suggestionsPanelOpen) {
+      if (panel) panel.remove();
+      if (suggestions.length === 0) {
+        runtimeState.suggestionsPanelOpen = false;
+      }
+      return;
+    }
+
+    if (!panel) {
+      panel = document.createElement('div');
+      panel.id = 'zerosub-suggestions-panel';
+      panel.className = 'zerosub-suggestions-panel';
+      toolbar.parentNode.insertBefore(panel, toolbar.nextSibling);
+    }
+
+    panel.innerHTML = '';
+
+    const header = document.createElement('div');
+    header.className = 'zerosub-suggestions-header';
+    header.innerHTML = `
+      <div>
+        <div class="zerosub-suggestions-title">Sugestões para Desinscrever (${suggestions.length})</div>
+        <div class="zerosub-suggestions-subtitle">Canais com 3 ou mais vídeos marcados como "Sem interesse"</div>
+      </div>
+    `;
+    panel.appendChild(header);
+
+    const listEl = document.createElement('div');
+    listEl.className = 'zerosub-suggestions-list';
+
+    suggestions.forEach((entry) => {
+      const item = document.createElement('div');
+      item.className = 'zerosub-suggestion-item';
+
+      const info = document.createElement('div');
+      info.className = 'zerosub-suggestion-info';
+
+      const nameEl = document.createElement('span');
+      nameEl.className = 'zerosub-suggestion-name';
+      nameEl.textContent = entry.channelName || entry.channelHandle || entry.channelKey;
+
+      const metaEl = document.createElement('span');
+      metaEl.className = 'zerosub-suggestion-meta';
+      metaEl.textContent = `${entry.videoIds.length} vídeos sem interesse`;
+
+      info.appendChild(nameEl);
+      info.appendChild(metaEl);
+
+      const actions = document.createElement('div');
+      actions.className = 'zerosub-suggestion-actions';
+
+      const keepBtn = document.createElement('button');
+      keepBtn.type = 'button';
+      keepBtn.className = 'zerosub-toolbar-btn';
+      keepBtn.textContent = 'Manter canal';
+      keepBtn.addEventListener('click', () => {
+        keepSuggestedChannel(entry);
+      });
+
+      const unsubBtn = document.createElement('button');
+      unsubBtn.type = 'button';
+      unsubBtn.className = 'zerosub-toolbar-btn zerosub-toolbar-btn-primary';
+      unsubBtn.textContent = 'Desinscrever';
+      unsubBtn.addEventListener('click', () => {
+        handleConfirmedUnsubscribe(entry, unsubBtn);
+      });
+
+      actions.appendChild(keepBtn);
+      actions.appendChild(unsubBtn);
+
+      item.appendChild(info);
+      item.appendChild(actions);
+      listEl.appendChild(item);
+    });
+
+    panel.appendChild(listEl);
+  }
+
+  /**
+   * Redefine o installTimestamp para Date.now(), registra os IDs âncora do topo (baselineAnchorIds)
+   * e dispensa os vídeos atualmente renderizados na fila para garantir corte definitivo do feed.
    */
   async function resetFeedToNow() {
     const now = Date.now();
     runtimeState.installTimestamp = now;
     runtimeState.zeroSubEnabled = true;
 
-    // Também adiciona os vídeos atualmente visíveis em dismissedVideos para evitar imprecisão de arredondamento ("há 1 minuto")
-    const visibleCards = document.querySelectorAll(
-      'ytd-browse[page-subtype="subscriptions"] ytd-rich-item-renderer:not(.zerosub-hidden), ytd-browse[page-subtype="subscriptions"] ytd-grid-video-renderer:not(.zerosub-hidden)'
+    const allCards = document.querySelectorAll(
+      'ytd-browse[page-subtype="subscriptions"] ytd-rich-item-renderer, ytd-browse[page-subtype="subscriptions"] ytd-grid-video-renderer'
     );
-    visibleCards.forEach((card) => {
+    const anchorIds = [];
+
+    allCards.forEach((card) => {
       const meta = inspectCardElement(card);
       if (meta.videoId) {
+        if (anchorIds.length < MAX_BASELINE_ANCHORS && !anchorIds.includes(meta.videoId)) {
+          anchorIds.push(meta.videoId);
+        }
         runtimeState.dismissedVideos.add(meta.videoId);
       }
     });
 
+    runtimeState.baselineAnchorIds = new Set(anchorIds);
     const dismissedArray = Array.from(runtimeState.dismissedVideos).slice(-MAX_DISMISSED_VIDEOS);
 
     if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
       await chrome.storage.local.set({
         installTimestamp: now,
         zeroSubEnabled: true,
+        baselineAnchorIds: anchorIds,
         dismissedVideos: dismissedArray,
         pendingCount: 0
       });
     }
 
     processSubscriptionsFeed();
-    showZeroSubToast('Marco Zero atualizado! Fila de inscrições zerada.');
+    showZeroSubToast('Marco Zero atualizado! Apenas vídeos novos aparecerão acima deste ponto.');
   }
 
   /**
@@ -861,6 +1217,7 @@
 
     const statusEl = toolbar.querySelector('#zerosub-toolbar-status');
     const toggleBtn = toolbar.querySelector('#zerosub-toggle-mode-btn');
+    const suggestionsBtn = toolbar.querySelector('#zerosub-suggestions-toggle-btn');
 
     const dateFormatted = new Date(runtimeState.installTimestamp).toLocaleString('pt-BR', {
       day: '2-digit',
@@ -882,6 +1239,101 @@
         ? 'Mostrar todos'
         : 'Ativar Modo ZeroSub';
       toggleBtn.classList.toggle('zerosub-mode-off', !runtimeState.zeroSubEnabled);
+    }
+
+    if (suggestionsBtn) {
+      const suggestions = getUnsubscribeSuggestions(
+        runtimeState.notInterestedByChannel,
+        runtimeState.unsubscribedChannels
+      );
+      if (suggestions.length > 0) {
+        suggestionsBtn.textContent = `Sugestões (${suggestions.length})`;
+        suggestionsBtn.classList.remove('zerosub-hidden');
+      } else {
+        suggestionsBtn.classList.add('zerosub-hidden');
+      }
+    }
+  }
+
+  /**
+   * Exibe ou oculta o banner de estado vazio "Inbox Zero" quando não restarem vídeos pendentes.
+   * @param {Element} browseRoot
+   * @param {number} visibleCount
+   */
+  function ensureEmptyStateBanner(browseRoot, visibleCount) {
+    if (typeof document === 'undefined' || !browseRoot) return;
+    let wrapper = browseRoot.querySelector('#zerosub-empty-wrapper');
+
+    const isEmpty = Boolean(runtimeState.zeroSubEnabled && visibleCount === 0);
+    browseRoot.classList.toggle('zerosub-feed-empty', isEmpty);
+
+    if (!isEmpty) {
+      if (wrapper) wrapper.remove();
+      return;
+    }
+
+    const dateFormatted = new Date(runtimeState.installTimestamp).toLocaleString('pt-BR', {
+      day: '2-digit',
+      month: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+
+    if (!wrapper) {
+      wrapper = document.createElement('div');
+      wrapper.id = 'zerosub-empty-wrapper';
+      wrapper.className = 'zerosub-empty-wrapper';
+
+      const banner = document.createElement('div');
+      banner.id = 'zerosub-empty-state';
+      banner.className = 'zerosub-empty-state';
+      banner.innerHTML = `
+        <div class="zerosub-empty-icon">✓</div>
+        <div class="zerosub-empty-title">Inbox Zero! Nenhum vídeo novo pendente</div>
+        <div id="zerosub-empty-subtitle" class="zerosub-empty-subtitle"></div>
+        <div class="zerosub-empty-actions">
+          <button type="button" id="zerosub-check-new-btn" class="zerosub-toolbar-btn zerosub-toolbar-btn-primary">
+            Verificar novos vídeos
+          </button>
+          <button type="button" id="zerosub-empty-show-all-btn" class="zerosub-toolbar-btn">
+            Mostrar todos
+          </button>
+        </div>
+      `;
+
+      wrapper.appendChild(banner);
+
+      const anchorEl =
+        document.getElementById('zerosub-suggestions-panel') ||
+        document.getElementById('zerosub-top-toolbar');
+      if (anchorEl && anchorEl.parentNode) {
+        anchorEl.parentNode.insertBefore(wrapper, anchorEl.nextSibling);
+      } else {
+        browseRoot.appendChild(wrapper);
+      }
+
+      const checkNewBtn = banner.querySelector('#zerosub-check-new-btn');
+      const showAllBtn = banner.querySelector('#zerosub-empty-show-all-btn');
+
+      if (checkNewBtn) {
+        checkNewBtn.addEventListener('click', () => {
+          window.location.reload();
+        });
+      }
+      if (showAllBtn) {
+        showAllBtn.addEventListener('click', async () => {
+          runtimeState.zeroSubEnabled = false;
+          if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+            await chrome.storage.local.set({ zeroSubEnabled: false });
+          }
+          processSubscriptionsFeed();
+        });
+      }
+    }
+
+    const subtitleEl = wrapper.querySelector('#zerosub-empty-subtitle');
+    if (subtitleEl) {
+      subtitleEl.textContent = `Sua fila está limpa desde ${dateFormatted}. Vídeos antigos permanecem ocultos.`;
     }
   }
 
@@ -952,27 +1404,42 @@
       }
     });
 
-    // 2. Avalia cada card de vídeo individual
-    const cards = browseRoot.querySelectorAll('ytd-rich-item-renderer, ytd-grid-video-renderer');
-    let visibleCount = 0;
+    // 2. Avalia todos os cards em ordem cronológica (com corte definitivo a partir do Marco Zero/âncora)
+    const cards = Array.from(
+      browseRoot.querySelectorAll('ytd-rich-item-renderer, ytd-grid-video-renderer')
+    );
+    const cardsMeta = cards.map((card) => inspectCardElement(card));
+    const { decisions, visibleCount, shouldHideContinuation } = evaluateFeedItems(
+      cardsMeta,
+      runtimeState
+    );
 
-    cards.forEach((card) => {
-      const cardMeta = inspectCardElement(card);
-      const decision = evaluateCardVisibility(cardMeta, runtimeState);
+    cards.forEach((card, index) => {
+      const cardMeta = cardsMeta[index];
+      const decision = decisions[index];
 
       if (decision.hidden) {
         card.classList.add('zerosub-hidden');
+        card.classList.remove('zerosub-card-managed');
         card.setAttribute('data-zerosub-hidden-reason', decision.reason || 'filtered');
       } else {
         card.classList.remove('zerosub-hidden');
+        card.classList.add('zerosub-card-managed');
         card.removeAttribute('data-zerosub-hidden-reason');
         ensureCardActionBar(card, cardMeta);
-        visibleCount++;
       }
+    });
+
+    // 3. Bloqueia/oculta o sentinela de paginação infinita do YouTube quando o corte foi atingido
+    const continuationItems = browseRoot.querySelectorAll('ytd-continuation-item-renderer');
+    continuationItems.forEach((item) => {
+      item.classList.toggle('zerosub-hidden', shouldHideContinuation);
     });
 
     runtimeState.pendingCount = visibleCount;
     updateToolbarUI();
+    renderSuggestionsPanel();
+    ensureEmptyStateBanner(browseRoot, visibleCount);
 
     if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
       chrome.storage.local.set({ pendingCount: visibleCount });
@@ -992,6 +1459,7 @@
     );
     runtimeState.pendingCount = visibleCards.length;
     updateToolbarUI();
+    ensureEmptyStateBanner(browseRoot, visibleCards.length);
 
     if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
       chrome.storage.local.set({ pendingCount: visibleCards.length });
@@ -1152,6 +1620,17 @@
           runtimeState.unsubscribedChannels = new Set(changes.unsubscribedChannels.newValue || []);
           needsRescan = true;
         }
+        if (changes.baselineAnchorIds !== undefined) {
+          runtimeState.baselineAnchorIds = new Set(changes.baselineAnchorIds.newValue || []);
+          needsRescan = true;
+        }
+        if (changes.notInterestedByChannel !== undefined) {
+          runtimeState.notInterestedByChannel = changes.notInterestedByChannel.newValue || {};
+          if (isSubscriptionsPage()) {
+            updateToolbarUI();
+            renderSuggestionsPanel();
+          }
+        }
 
         if (needsRescan && isSubscriptionsPage()) {
           processSubscriptionsFeed();
@@ -1159,13 +1638,19 @@
       });
     }
 
-    // Escuta mensagens diretas do Popup (ex: comando "RESET_FEED_NOW")
+    // Escuta mensagens diretas do Popup (ex: comando "RESET_FEED_NOW" ou "UNSUBSCRIBE_CHANNEL")
     if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
       chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         if (!msg || typeof msg !== 'object') return false;
         if (msg.type === 'ZEROSUB_RESET_NOW') {
           resetFeedToNow().then(() => {
             sendResponse({ ok: true, pendingCount: runtimeState.pendingCount });
+          });
+          return true;
+        }
+        if (msg.type === 'ZEROSUB_UNSUBSCRIBE_CHANNEL' && msg.channelInfo) {
+          handleConfirmedUnsubscribe(msg.channelInfo, null).then((result) => {
+            sendResponse({ ok: Boolean(result && result.ok), result });
           });
           return true;
         }
@@ -1204,20 +1689,30 @@
 
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
+      NOT_INTERESTED_THRESHOLD,
       parseRelativeTime,
       extractVideoIdFromHref,
       isScheduledLiveText,
       evaluateCardVisibility,
+      evaluateFeedItems,
+      recordNotInterestedVideo,
+      getUnsubscribeSuggestions,
+      removeChannelFromNotInterested,
       shouldAutoMarkWatched,
       appendDismissedVideo,
       createTwoStepConfirmation
     };
   } else if (rootScope) {
     rootScope.ZeroSubContent = {
+      NOT_INTERESTED_THRESHOLD,
       parseRelativeTime,
       extractVideoIdFromHref,
       isScheduledLiveText,
       evaluateCardVisibility,
+      evaluateFeedItems,
+      recordNotInterestedVideo,
+      getUnsubscribeSuggestions,
+      removeChannelFromNotInterested,
       shouldAutoMarkWatched,
       appendDismissedVideo,
       createTwoStepConfirmation

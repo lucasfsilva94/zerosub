@@ -14,6 +14,9 @@
   --zerosub-seen-bg: rgba(15, 157, 88, 0.12);
   --zerosub-seen-text: #0d7a43;
   --zerosub-seen-hover: rgba(15, 157, 88, 0.22);
+  --zerosub-not-int-bg: rgba(230, 126, 34, 0.12);
+  --zerosub-not-int-text: #b85d0b;
+  --zerosub-not-int-hover: rgba(230, 126, 34, 0.22);
   --zerosub-unsub-bg: rgba(0, 0, 0, 0.06);
   --zerosub-unsub-text: #606060;
   --zerosub-confirm-bg: #cc0000;
@@ -31,6 +34,9 @@ html[dark] {
   --zerosub-seen-bg: rgba(46, 204, 113, 0.14);
   --zerosub-seen-text: #58d68d;
   --zerosub-seen-hover: rgba(46, 204, 113, 0.26);
+  --zerosub-not-int-bg: rgba(243, 156, 18, 0.15);
+  --zerosub-not-int-text: #f5b041;
+  --zerosub-not-int-hover: rgba(243, 156, 18, 0.26);
   --zerosub-unsub-bg: rgba(255, 255, 255, 0.08);
   --zerosub-unsub-text: #aaaaaa;
   --zerosub-confirm-bg: #ff3b30;
@@ -126,15 +132,39 @@ html[dark] {
   background-color: var(--zerosub-accent-hover);
 }
 
-/* Barra de ações rápida em cada card de vídeo */
+/* Contêiner visual dedicado para cada card visível no feed */
+.zerosub-card-managed {
+  display: flex !important;
+  flex-direction: column !important;
+  justify-content: space-between !important;
+  border: 1px solid var(--zerosub-border) !important;
+  border-radius: 12px !important;
+  padding: 8px !important;
+  box-sizing: border-box !important;
+  background-color: var(--zerosub-bg-surface) !important;
+}
+
+.zerosub-card-managed > #content {
+  width: 100% !important;
+  display: flex !important;
+  flex-direction: column !important;
+  flex: 1 1 auto !important;
+}
+
+/* Barra de ações rápida em linha única no rodapé de cada card */
 .zerosub-card-actions {
+  position: relative;
+  z-index: 3;
   display: flex;
+  flex-wrap: nowrap;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  margin-top: 8px;
-  padding-top: 6px;
+  gap: 6px;
+  width: 100%;
+  margin-top: 10px;
+  padding-top: 8px;
   border-top: 1px solid var(--zerosub-border);
+  box-sizing: border-box;
   font-family: "Roboto", "Arial", sans-serif;
 }
 
@@ -143,14 +173,18 @@ html[dark] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 5px;
+  gap: 4px;
+  min-width: 0;
   border: none;
-  border-radius: 16px;
-  padding: 5px 11px;
+  border-radius: 14px;
+  padding: 6px 8px;
   font-family: inherit;
-  font-size: 12px;
-  font-weight: 500;
+  font-size: 11px;
+  font-weight: 600;
   line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   cursor: pointer;
   transition: background-color 0.15s ease, color 0.15s ease, transform 0.1s ease;
 }
@@ -160,7 +194,7 @@ html[dark] {
 }
 
 .zerosub-btn-seen {
-  flex: 1;
+  flex: 1 1 0;
   background-color: var(--zerosub-seen-bg);
   color: var(--zerosub-seen-text);
 }
@@ -169,12 +203,24 @@ html[dark] {
   background-color: var(--zerosub-seen-hover);
 }
 
+.zerosub-btn-not-interested {
+  flex: 1.2 1 0;
+  background-color: var(--zerosub-not-int-bg);
+  color: var(--zerosub-not-int-text);
+}
+
+.zerosub-btn-not-interested:hover {
+  background-color: var(--zerosub-not-int-hover);
+}
+
 .zerosub-icon {
   font-weight: 700;
-  font-size: 12px;
+  font-size: 11px;
+  flex-shrink: 0;
 }
 
 .zerosub-btn-unsub {
+  flex: 1 1 0;
   background-color: var(--zerosub-unsub-bg);
   color: var(--zerosub-unsub-text);
 }
@@ -188,6 +234,146 @@ html[dark] {
   background-color: var(--zerosub-confirm-bg) !important;
   color: var(--zerosub-confirm-text) !important;
   font-weight: 700;
+}
+
+/* Botão de sugestões na barra superior e painel expansível */
+.zerosub-toolbar-btn-suggestions {
+  background-color: var(--zerosub-not-int-bg);
+  border-color: transparent;
+  color: var(--zerosub-not-int-text);
+  font-weight: 600;
+}
+
+.zerosub-toolbar-btn-suggestions:hover {
+  background-color: var(--zerosub-not-int-hover);
+}
+
+.zerosub-suggestions-panel {
+  margin: 0 24px 12px 24px;
+  padding: 12px 16px;
+  border-radius: 12px;
+  background-color: var(--zerosub-bg-surface);
+  border: 1px solid var(--zerosub-border);
+  font-family: "Roboto", "Arial", sans-serif;
+  color: var(--zerosub-text-primary);
+  box-sizing: border-box;
+}
+
+.zerosub-suggestions-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.zerosub-suggestions-title {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.zerosub-suggestions-subtitle {
+  font-size: 12px;
+  color: var(--zerosub-text-secondary);
+}
+
+.zerosub-suggestions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.zerosub-suggestion-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--zerosub-border);
+  background-color: transparent;
+}
+
+.zerosub-suggestion-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.zerosub-suggestion-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--zerosub-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.zerosub-suggestion-meta {
+  font-size: 11px;
+  color: var(--zerosub-text-secondary);
+}
+
+.zerosub-suggestion-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* Estado vazio Inbox Zero: oculta cabeçalho nativo ("Latest" / "All subscriptions") e centraliza na tela */
+ytd-browse[page-subtype="subscriptions"].zerosub-feed-empty ytd-rich-grid-renderer,
+ytd-browse[page-subtype="subscriptions"].zerosub-feed-empty ytd-section-list-renderer {
+  display: none !important;
+}
+
+.zerosub-empty-wrapper {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: calc(100vh - 180px);
+  width: 100%;
+  padding: 24px;
+  box-sizing: border-box;
+}
+
+.zerosub-empty-state {
+  margin: 0 auto;
+  width: 100%;
+  max-width: 520px;
+  padding: 36px 28px;
+  border-radius: 16px;
+  background-color: var(--zerosub-bg-surface);
+  border: 1px solid var(--zerosub-border);
+  text-align: center;
+  font-family: "Roboto", "Arial", sans-serif;
+  color: var(--zerosub-text-primary);
+}
+
+.zerosub-empty-icon {
+  font-size: 32px;
+  margin-bottom: 8px;
+  color: var(--zerosub-seen-text);
+}
+
+.zerosub-empty-title {
+  font-size: 18px;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+.zerosub-empty-subtitle {
+  font-size: 13px;
+  color: var(--zerosub-text-secondary);
+  margin-bottom: 18px;
+}
+
+.zerosub-empty-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 /* Toast de feedback no canto inferior */

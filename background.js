@@ -10,6 +10,8 @@ const DEFAULT_STATE = {
   autoMarkWatched: true,
   dismissedVideos: [],
   unsubscribedChannels: [],
+  baselineAnchorIds: [],
+  notInterestedByChannel: {},
   pendingCount: 0
 };
 
@@ -30,7 +32,13 @@ function buildInitialStatePatch(existingData = {}, now = Date.now()) {
 
   for (const [key, defaultValue] of Object.entries(DEFAULT_STATE)) {
     if (existingData[key] === undefined) {
-      patch[key] = Array.isArray(defaultValue) ? [...defaultValue] : defaultValue;
+      if (Array.isArray(defaultValue)) {
+        patch[key] = [...defaultValue];
+      } else if (defaultValue && typeof defaultValue === 'object') {
+        patch[key] = { ...defaultValue };
+      } else {
+        patch[key] = defaultValue;
+      }
     }
   }
 

@@ -134,7 +134,8 @@ body {
   background-color: var(--bg-card-hover);
 }
 
-.settings-section {
+.settings-section,
+.suggestions-section {
   background-color: var(--bg-card);
   border: 1px solid var(--border-subtle);
   border-radius: 10px;
@@ -142,6 +143,100 @@ body {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.suggestions-section[hidden] {
+  display: none;
+}
+
+.suggestions-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.suggestions-badge {
+  background-color: rgba(243, 156, 18, 0.2);
+  color: #f5b041;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 7px;
+  border-radius: 10px;
+}
+
+.suggestions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.suggestion-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background-color: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border-subtle);
+}
+
+.suggestion-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.suggestion-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-main);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.suggestion-count {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.suggestion-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.btn-mini {
+  appearance: none;
+  border: none;
+  border-radius: 6px;
+  padding: 4px 7px;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn-mini-keep {
+  background-color: rgba(255, 255, 255, 0.1);
+  color: var(--text-main);
+}
+
+.btn-mini-keep:hover {
+  background-color: rgba(255, 255, 255, 0.18);
+}
+
+.btn-mini-unsub {
+  background-color: var(--accent-red);
+  color: #ffffff;
+}
+
+.btn-mini-unsub:hover {
+  background-color: var(--accent-red-hover);
 }
 
 .section-title {
