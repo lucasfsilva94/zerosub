@@ -427,6 +427,32 @@ body {
   cursor: pointer;
 }
 
+.select-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 0 2px 0;
+  border-top: 1px solid var(--border-subtle);
+  margin-top: 2px;
+}
+
+.select-input {
+  background-color: var(--bg-main);
+  color: var(--text-main);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  outline: none;
+}
+
+.select-input:focus {
+  border-color: var(--accent-red);
+}
+
 .status-message {
   min-height: 16px;
   text-align: center;

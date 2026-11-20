@@ -8,6 +8,24 @@
  */
 
 (function initZeroSubPopup(rootScope) {
+  const ALLOWED_AUTO_REFRESH_MINUTES = [0, 5, 10, 15, 30, 60];
+  const DEFAULT_AUTO_REFRESH_MINUTES = 10;
+
+  /**
+   * Normaliza o intervalo de atualização automática em minutos.
+   * @param {any} value
+   * @returns {number}
+   */
+  function normalizePopupAutoRefreshMinutes(value) {
+    if (value === undefined || value === null || value === '') {
+      return DEFAULT_AUTO_REFRESH_MINUTES;
+    }
+    const num = Number(value);
+    if (Number.isNaN(num) || num < 0) return 0;
+    if (ALLOWED_AUTO_REFRESH_MINUTES.includes(num)) return num;
+    return DEFAULT_AUTO_REFRESH_MINUTES;
+  }
+
   /**
    * Executa a ação "Zerar tudo agora" no storage.
    * @param {chrome.storage.StorageArea} storageArea
@@ -272,6 +290,7 @@
     const toggleHideShorts = document.getElementById('toggle-hide-shorts');
     const toggleHideLives = document.getElementById('toggle-hide-lives');
     const toggleAutoWatched = document.getElementById('toggle-auto-watched');
+    const selectAutoRefresh = document.getElementById('select-auto-refresh');
 
     if (!pendingCountEl || !btnResetNow) return;
 
@@ -539,6 +558,7 @@
         'hideShorts',
         'hideScheduledLives',
         'autoMarkWatched',
+        'autoRefreshMinutes',
         'dismissedVideos',
         'watchLaterVideos',
         'unsubscribedChannels',
@@ -565,6 +585,9 @@
       if (toggleHideShorts) toggleHideShorts.checked = data.hideShorts !== false;
       if (toggleHideLives) toggleHideLives.checked = data.hideScheduledLives !== false;
       if (toggleAutoWatched) toggleAutoWatched.checked = data.autoMarkWatched !== false;
+      if (selectAutoRefresh) {
+        selectAutoRefresh.value = String(normalizePopupAutoRefreshMinutes(data.autoRefreshMinutes));
+      }
 
       renderWatchLater(watchLaterList);
 
@@ -632,6 +655,19 @@
     bindToggle(toggleHideLives, 'hideScheduledLives');
     bindToggle(toggleAutoWatched, 'autoMarkWatched');
 
+    if (selectAutoRefresh) {
+      selectAutoRefresh.addEventListener('change', async () => {
+        const minutes = normalizePopupAutoRefreshMinutes(selectAutoRefresh.value);
+        await chrome.storage.local.set({ autoRefreshMinutes: minutes });
+        await refreshUI();
+        showFeedback(
+          minutes === 0
+            ? 'Atualização automática desativada'
+            : `Atualização automática: a cada ${minutes === 60 ? '1 hora' : `${minutes} min`}`
+        );
+      });
+    }
+
     if (chrome.storage.onChanged) {
       chrome.storage.onChanged.addListener((_changes, areaName) => {
         if (areaName === 'local') {
@@ -661,7 +697,8 @@
       markWatchLaterAsSeenInStorage,
       markWatchLaterNotInterestedInStorage,
       removeChannelFromWatchLaterInStorage,
-      createPopupTwoStepConfirmation
+      createPopupTwoStepConfirmation,
+      normalizePopupAutoRefreshMinutes
     };
   } else if (rootScope) {
     rootScope.ZeroSubPopup = {
@@ -673,7 +710,8 @@
       markWatchLaterAsSeenInStorage,
       markWatchLaterNotInterestedInStorage,
       removeChannelFromWatchLaterInStorage,
-      createPopupTwoStepConfirmation
+      createPopupTwoStepConfirmation,
+      normalizePopupAutoRefreshMinutes
     };
   }
 })(typeof globalThis !== 'undefined' ? globalThis : this);

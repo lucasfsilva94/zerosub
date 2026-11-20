@@ -74,6 +74,18 @@
         <span>Marcar como visto ao assistir &gt;90%</span>
         <input type="checkbox" id="toggle-auto-watched" checked />
       </label>
+
+      <label class="select-row" for="select-auto-refresh">
+        <span>Atualização automática</span>
+        <select id="select-auto-refresh" class="select-input">
+          <option value="0">Desativado</option>
+          <option value="5">A cada 5 min</option>
+          <option value="10" selected>A cada 10 min</option>
+          <option value="15">A cada 15 min</option>
+          <option value="30">A cada 30 min</option>
+          <option value="60">A cada 1 hora</option>
+        </select>
+      </label>
     </section>
 
     <footer id="status-message" class="status-message" aria-live="polite"></footer>

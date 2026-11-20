@@ -17,6 +17,8 @@
   const MAX_BASELINE_ANCHORS = 30;
   const CONFIRM_TIMEOUT_MS = 4000;
   const NOT_INTERESTED_THRESHOLD = 3;
+  const DEFAULT_AUTO_REFRESH_MINUTES = 10;
+  const ALLOWED_AUTO_REFRESH_MINUTES = [0, 5, 10, 15, 30, 60];
 
   const UNIT_TO_MS = {
     second: 1000,
@@ -450,6 +452,125 @@
   }
 
   /**
+   * Normaliza o intervalo de verificação automática em minutos (0 = desativado).
+   * @param {any} value
+   * @returns {number}
+   */
+  function normalizeAutoRefreshMinutes(value) {
+    if (value === undefined || value === null || value === '') {
+      return DEFAULT_AUTO_REFRESH_MINUTES;
+    }
+    const num = Number(value);
+    if (Number.isNaN(num) || num < 0) return 0;
+    if (ALLOWED_AUTO_REFRESH_MINUTES.includes(num)) return num;
+    return DEFAULT_AUTO_REFRESH_MINUTES;
+  }
+
+  /**
+   * Avalia os itens obtidos via consulta silenciosa InnerTube (`FEsubscriptions`) aplicando
+   * as mesmas regras de filtragem do feed para identificar quantos vídeos novos chegaram
+   * em relação aos já renderizados no DOM.
+   *
+   * @param {Array<Record<string, any>>} remoteItems
+   * @param {Set<string> | string[]} knownDomVideoIds
+   * @param {Parameters<typeof evaluateFeedItems>[1]} state
+   * @param {number} [nowMs=Date.now()]
+   */
+  function evaluateRemoteNewVideos(
+    remoteItems = [],
+    knownDomVideoIds = new Set(),
+    state = {},
+    nowMs = Date.now()
+  ) {
+    const knownSet =
+      knownDomVideoIds instanceof Set
+        ? knownDomVideoIds
+        : new Set(Array.isArray(knownDomVideoIds) ? knownDomVideoIds : []);
+
+    const cardsMeta = (Array.isArray(remoteItems) ? remoteItems : [])
+      .filter((item) => item && item.videoId)
+      .map((item) => {
+        const publishedTimestamp = item.publishedTimeText
+          ? parseRelativeTime(item.publishedTimeText, nowMs)
+          : null;
+        return {
+          videoId: item.videoId,
+          channelId: item.channelId || '',
+          channelHandle: item.channelHandle || '',
+          channelKey: item.channelId || item.channelHandle || item.channelName || '',
+          channelName: item.channelName || '',
+          publishedTimestamp,
+          isShort: Boolean(item.isShort),
+          isUpcoming: Boolean(item.isUpcoming),
+          isLiveNow: Boolean(item.isLive || item.isLiveNow)
+        };
+      });
+
+    const { decisions, visibleCount } = evaluateFeedItems(cardsMeta, state);
+    const newVideoIds = [];
+
+    for (let i = 0; i < cardsMeta.length; i++) {
+      const decision = decisions[i];
+      const videoId = cardsMeta[i].videoId;
+      if (decision && !decision.hidden && !knownSet.has(videoId)) {
+        newVideoIds.push(videoId);
+      }
+    }
+
+    return {
+      totalRemotePending: visibleCount,
+      newlyArrivedCount: newVideoIds.length,
+      newVideoIds
+    };
+  }
+
+  /**
+   * Decide de forma não-intrusiva o que fazer após uma verificação automática periódica:
+   * - `auto-reload`: há novos vídeos e a fila está zerada e ociosa (sem painéis nem confirmação aberta)
+   * - `notify-banner`: há novos vídeos, mas o usuário está interagindo (exibe botão na barra)
+   * - `reload-fallback`: consulta silenciosa falhou e o usuário está em Inbox Zero ocioso
+   * - `none`: sem novidades ou usuário ocupado em falha silenciosa
+   *
+   * @param {{
+   *   remoteCheckOk: boolean,
+   *   newlyArrivedCount?: number,
+   *   currentPendingCount?: number,
+   *   watchLaterPanelOpen?: boolean,
+   *   suggestionsPanelOpen?: boolean,
+   *   hasActiveConfirmation?: boolean
+   * }} params
+   */
+  function decideAutoRefreshAction({
+    remoteCheckOk,
+    newlyArrivedCount = 0,
+    currentPendingCount = 0,
+    watchLaterPanelOpen = false,
+    suggestionsPanelOpen = false,
+    hasActiveConfirmation = false
+  }) {
+    const isBusy = Boolean(
+      currentPendingCount > 0 ||
+        watchLaterPanelOpen ||
+        suggestionsPanelOpen ||
+        hasActiveConfirmation
+    );
+
+    if (!remoteCheckOk) {
+      return { action: isBusy ? 'none' : 'reload-fallback', newCount: 0 };
+    }
+
+    if (newlyArrivedCount <= 0) {
+      return { action: 'none', newCount: 0 };
+    }
+
+    if (!isBusy) {
+      return { action: 'auto-reload', newCount: newlyArrivedCount };
+    }
+
+    return { action: 'notify-banner', newCount: newlyArrivedCount };
+  }
+
+  /**
    * Registra um vídeo marcado como "Não tenho interesse" em um mapa deduplicado por canal.
    *
    * @param {Record<string, { channelKey: string, channelId: string, channelHandle: string, channelName: string, videoIds: string[], updatedAt: number }>} currentMap
@@ -762,6 +883,7 @@
 
   const metadataCache = new Map(); // videoId -> metadata from MAIN world + firstSeenTimestamp
   const pendingUnsubscribeCallbacks = new Map(); // requestId -> resolve
+  const pendingFeedCheckCallbacks = new Map(); // requestId -> resolve
 
   const runtimeState = {
     installTimestamp: Date.now(),
@@ -770,6 +892,9 @@
     hideShorts: true,
     hideScheduledLives: true,
     autoMarkWatched: true,
+    autoRefreshMinutes: DEFAULT_AUTO_REFRESH_MINUTES,
+    lastAutoCheckAt: null,
+    pendingNewVideosCount: 0,
     dismissedVideos: new Set(),
     watchLaterVideos: [],
     unsubscribedChannels: new Set(),
@@ -783,6 +908,8 @@
 
   let feedObserver = null;
   let scheduledScanFrame = null;
+  let autoRefreshTimerId = null;
+  let autoRefreshInFlight = false;
   let lastAutoMarkedVideoId = '';
   let lastPersistedPendingCount = null;
 
@@ -802,6 +929,7 @@
       'hideShorts',
       'hideScheduledLives',
       'autoMarkWatched',
+      'autoRefreshMinutes',
       'dismissedVideos',
       'watchLaterVideos',
       'unsubscribedChannels',
@@ -830,6 +958,7 @@
     runtimeState.hideShorts = data.hideShorts !== false;
     runtimeState.hideScheduledLives = data.hideScheduledLives !== false;
     runtimeState.autoMarkWatched = data.autoMarkWatched !== false;
+    runtimeState.autoRefreshMinutes = normalizeAutoRefreshMinutes(data.autoRefreshMinutes);
     runtimeState.dismissedVideos = new Set(
       Array.isArray(data.dismissedVideos) ? data.dismissedVideos : []
     );
@@ -1302,6 +1431,132 @@
   }
 
   /**
+   * Solicita ao MAIN world uma checagem silenciosa do feed FEsubscriptions com timeout de 8s.
+   * @returns {Promise<{ ok: boolean, items: any[], error?: string }>}
+   */
+  function requestMainWorldFeedCheck() {
+    return new Promise((resolve) => {
+      const requestId = `chk_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const timer = setTimeout(() => {
+        pendingFeedCheckCallbacks.delete(requestId);
+        resolve({ ok: false, items: [], error: 'Timeout na verificação silenciosa' });
+      }, 8000);
+
+      pendingFeedCheckCallbacks.set(requestId, (result) => {
+        clearTimeout(timer);
+        pendingFeedCheckCallbacks.delete(requestId);
+        resolve(result || { ok: false, items: [] });
+      });
+
+      window.postMessage(
+        {
+          source: ISOLATED_SOURCE,
+          type: 'CHECK_NEW_VIDEOS',
+          requestId
+        },
+        '*'
+      );
+    });
+  }
+
+  /**
+   * Executa uma verificação periódica silenciosa de novos vídeos em /feed/subscriptions.
+   */
+  async function runAutoRefreshCheck() {
+    if (
+      typeof document === 'undefined' ||
+      !isSubscriptionsPage() ||
+      !runtimeState.loaded ||
+      !runtimeState.zeroSubEnabled ||
+      runtimeState.autoRefreshMinutes <= 0 ||
+      autoRefreshInFlight
+    ) {
+      return;
+    }
+
+    autoRefreshInFlight = true;
+    try {
+      const result = await requestMainWorldFeedCheck();
+      const browseRoot = document.querySelector('ytd-browse[page-subtype="subscriptions"]');
+      const domCards = queryFeedVideoCards(browseRoot);
+      const knownDomVideoIds = new Set(
+        domCards.map((card) => inspectCardElement(card).videoId).filter(Boolean)
+      );
+
+      const evalResult = result.ok
+        ? evaluateRemoteNewVideos(result.items, knownDomVideoIds, runtimeState)
+        : { totalRemotePending: 0, newlyArrivedCount: 0, newVideoIds: [] };
+
+      const hasActiveConfirmation = Boolean(document.querySelector('.zerosub-btn-confirming'));
+      const decision = decideAutoRefreshAction({
+        remoteCheckOk: Boolean(result.ok),
+        newlyArrivedCount: evalResult.newlyArrivedCount,
+        currentPendingCount: runtimeState.pendingCount,
+        watchLaterPanelOpen: runtimeState.watchLaterPanelOpen,
+        suggestionsPanelOpen: runtimeState.suggestionsPanelOpen,
+        hasActiveConfirmation
+      });
+
+      runtimeState.lastAutoCheckAt = Date.now();
+
+      if (decision.action === 'auto-reload') {
+        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+          await chrome.storage.local.set({ pendingCount: evalResult.totalRemotePending });
+        }
+        window.location.reload();
+        return;
+      }
+
+      if (decision.action === 'reload-fallback') {
+        window.location.reload();
+        return;
+      }
+
+      if (decision.action === 'notify-banner') {
+        runtimeState.pendingNewVideosCount = decision.newCount;
+        updateToolbarUI();
+        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+          const totalWithNew = runtimeState.pendingCount + decision.newCount;
+          lastPersistedPendingCount = totalWithNew;
+          await chrome.storage.local.set({ pendingCount: totalWithNew });
+        }
+        return;
+      }
+
+      // Sem novidades: atualiza apenas o indicador discreto de última verificação
+      if (browseRoot) {
+        ensureEmptyStateBanner(browseRoot, runtimeState.pendingCount, domCards.length);
+      }
+    } finally {
+      autoRefreshInFlight = false;
+    }
+  }
+
+  /**
+   * (Re)agenda o temporizador de verificação automática periódica conforme autoRefreshMinutes.
+   */
+  function setupAutoRefreshTimer() {
+    if (autoRefreshTimerId !== null) {
+      clearInterval(autoRefreshTimerId);
+      autoRefreshTimerId = null;
+    }
+
+    if (
+      typeof window === 'undefined' ||
+      !isSubscriptionsPage() ||
+      !runtimeState.zeroSubEnabled ||
+      runtimeState.autoRefreshMinutes <= 0
+    ) {
+      return;
+    }
+
+    const intervalMs = runtimeState.autoRefreshMinutes * 60 * 1000;
+    autoRefreshTimerId = setInterval(() => {
+      runAutoRefreshCheck();
+    }, intervalMs);
+  }
+
+  /**
    * Fallback UI quando a requisição direta InnerTube não puder ser concluída.
    * Abre a página do canal em uma aba/janela auxiliar com parâmetro para confirmar ou exibe toast com link direto.
    * @param {string} channelId
@@ -1474,6 +1729,7 @@
           <span id="zerosub-toolbar-status" class="zerosub-toolbar-status"></span>
         </div>
         <div class="zerosub-toolbar-actions">
+          <button type="button" id="zerosub-new-videos-btn" class="zerosub-toolbar-btn zerosub-toolbar-btn-new-videos zerosub-hidden"></button>
           <button type="button" id="zerosub-watch-later-toggle-btn" class="zerosub-toolbar-btn zerosub-toolbar-btn-watch-later zerosub-hidden"></button>
           <button type="button" id="zerosub-suggestions-toggle-btn" class="zerosub-toolbar-btn zerosub-toolbar-btn-suggestions zerosub-hidden"></button>
           <button type="button" id="zerosub-toggle-mode-btn" class="zerosub-toolbar-btn"></button>
@@ -1490,10 +1746,19 @@
 
       targetParent.insertBefore(toolbar, targetParent.firstChild);
 
+      const newVideosBtn = toolbar.querySelector('#zerosub-new-videos-btn');
       const watchLaterBtn = toolbar.querySelector('#zerosub-watch-later-toggle-btn');
       const suggestionsBtn = toolbar.querySelector('#zerosub-suggestions-toggle-btn');
       const toggleBtn = toolbar.querySelector('#zerosub-toggle-mode-btn');
       const resetBtn = toolbar.querySelector('#zerosub-reset-now-btn');
+
+      if (newVideosBtn) {
+        newVideosBtn.addEventListener('click', () => {
+          newVideosBtn.disabled = true;
+          newVideosBtn.textContent = 'Atualizando...';
+          window.location.reload();
+        });
+      }
 
       if (watchLaterBtn) {
         watchLaterBtn.addEventListener('click', () => {
@@ -1958,6 +2223,7 @@
 
     const statusEl = toolbar.querySelector('#zerosub-toolbar-status');
     const toggleBtn = toolbar.querySelector('#zerosub-toggle-mode-btn');
+    const newVideosBtn = toolbar.querySelector('#zerosub-new-videos-btn');
     const watchLaterBtn = toolbar.querySelector('#zerosub-watch-later-toggle-btn');
     const suggestionsBtn = toolbar.querySelector('#zerosub-suggestions-toggle-btn');
 
@@ -1981,6 +2247,16 @@
         ? 'Mostrar todos'
         : 'Ativar Modo ZeroSub';
       toggleBtn.classList.toggle('zerosub-mode-off', !runtimeState.zeroSubEnabled);
+    }
+
+    if (newVideosBtn) {
+      const newCount = Number(runtimeState.pendingNewVideosCount) || 0;
+      if (runtimeState.zeroSubEnabled && newCount > 0) {
+        newVideosBtn.textContent = `↻ +${newCount} novo(s) • Atualizar`;
+        newVideosBtn.classList.remove('zerosub-hidden');
+      } else {
+        newVideosBtn.classList.add('zerosub-hidden');
+      }
     }
 
     if (watchLaterBtn) {
@@ -2057,6 +2333,7 @@
             Mostrar todos
           </button>
         </div>
+        <div id="zerosub-empty-auto-refresh-status" class="zerosub-empty-auto-refresh"></div>
       `;
 
       wrapper.appendChild(banner);
@@ -2128,6 +2405,25 @@
         emptyWatchLaterBtn.classList.remove('zerosub-hidden');
       } else {
         emptyWatchLaterBtn.classList.add('zerosub-hidden');
+      }
+    }
+
+    const autoRefreshStatusEl = wrapper.querySelector('#zerosub-empty-auto-refresh-status');
+    if (autoRefreshStatusEl) {
+      const mins = normalizeAutoRefreshMinutes(runtimeState.autoRefreshMinutes);
+      if (mins <= 0) {
+        autoRefreshStatusEl.textContent = 'Verificação automática desativada (ajuste no popup da extensão).';
+      } else {
+        const intervalLabel = mins === 60 ? '1 hora' : `${mins} min`;
+        if (typeof runtimeState.lastAutoCheckAt === 'number') {
+          const checkTime = new Date(runtimeState.lastAutoCheckAt).toLocaleTimeString('pt-BR', {
+            hour: '2-digit',
+            minute: '2-digit'
+          });
+          autoRefreshStatusEl.textContent = `Verificação automática a cada ${intervalLabel} • Última às ${checkTime}`;
+        } else {
+          autoRefreshStatusEl.textContent = `Verificação automática ativa (a cada ${intervalLabel}).`;
+        }
       }
     }
   }
@@ -2457,6 +2753,11 @@
         if (resolver) {
           resolver(event.data);
         }
+      } else if (type === 'CHECK_NEW_VIDEOS_RESULT' && requestId) {
+        const resolver = pendingFeedCheckCallbacks.get(requestId);
+        if (resolver) {
+          resolver(event.data);
+        }
       }
     });
 
@@ -2480,6 +2781,7 @@
         }
         if (changes.zeroSubEnabled !== undefined) {
           runtimeState.zeroSubEnabled = changes.zeroSubEnabled.newValue !== false;
+          setupAutoRefreshTimer();
           needsRescan = true;
         }
         if (changes.hideShorts !== undefined) {
@@ -2492,6 +2794,13 @@
         }
         if (changes.autoMarkWatched !== undefined) {
           runtimeState.autoMarkWatched = changes.autoMarkWatched.newValue !== false;
+        }
+        if (changes.autoRefreshMinutes !== undefined) {
+          runtimeState.autoRefreshMinutes = normalizeAutoRefreshMinutes(
+            changes.autoRefreshMinutes.newValue
+          );
+          setupAutoRefreshTimer();
+          needsRescan = true;
         }
         if (changes.dismissedVideos !== undefined) {
           runtimeState.dismissedVideos = new Set(changes.dismissedVideos.newValue || []);
@@ -2553,6 +2862,7 @@
     document.addEventListener('yt-navigate-finish', () => {
       window.postMessage({ source: ISOLATED_SOURCE, type: 'REQUEST_INITIAL_METADATA' }, '*');
       setupMutationObserver();
+      setupAutoRefreshTimer();
       if (isSubscriptionsPage()) {
         scheduleFeedScan();
       } else if (isWatchPage()) {
@@ -2563,6 +2873,7 @@
     // Inicialização na carga atual
     window.postMessage({ source: ISOLATED_SOURCE, type: 'REQUEST_INITIAL_METADATA' }, '*');
     setupMutationObserver();
+    setupAutoRefreshTimer();
     if (isSubscriptionsPage()) {
       processSubscriptionsFeed();
     } else if (isWatchPage()) {
@@ -2588,6 +2899,9 @@
       shouldShowEmptyState,
       resolveClearedTimestamp,
       getDisplayClearedTimestamp,
+      normalizeAutoRefreshMinutes,
+      evaluateRemoteNewVideos,
+      decideAutoRefreshAction,
       recordNotInterestedVideo,
       getUnsubscribeSuggestions,
       removeChannelFromNotInterested,
@@ -2614,6 +2928,9 @@
       shouldShowEmptyState,
       resolveClearedTimestamp,
       getDisplayClearedTimestamp,
+      normalizeAutoRefreshMinutes,
+      evaluateRemoteNewVideos,
+      decideAutoRefreshAction,
       recordNotInterestedVideo,
       getUnsubscribeSuggestions,
       removeChannelFromNotInterested,

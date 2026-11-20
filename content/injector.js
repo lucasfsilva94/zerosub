@@ -518,6 +518,114 @@
     }
   }
 
+  let originalFetchRef = null;
+
+  /**
+   * Consulta silenciosamente o feed de inscrições (FEsubscriptions) via InnerTube /youtubei/v1/browse
+   * para detectar novos vídeos sem recarregar a página.
+   *
+   * @param {{
+   *   cookieString?: string,
+   *   origin?: string,
+   *   ytcfgObj?: { get?: (key: string) => any },
+   *   fetchImpl?: typeof fetch
+   * }} options
+   * @returns {Promise<{ ok: boolean, items: any[], status?: number, error?: string }>}
+   */
+  async function fetchSubscriptionsFeedMetadata(options = {}) {
+    const {
+      cookieString = typeof document !== 'undefined' ? document.cookie : '',
+      origin = typeof location !== 'undefined' ? location.origin : 'https://www.youtube.com',
+      ytcfgObj = typeof window !== 'undefined' ? window.ytcfg : null,
+      fetchImpl = originalFetchRef || (typeof fetch !== 'undefined' ? fetch.bind(globalThis) : null)
+    } = options;
+
+    if (!fetchImpl) {
+      return { ok: false, items: [], error: 'fetch indisponível' };
+    }
+
+    const sapisid =
+      getCookieValue(cookieString, 'SAPISID') ||
+      getCookieValue(cookieString, '__Secure-3PAPISID');
+
+    if (!sapisid) {
+      return { ok: false, items: [], error: 'Sessão SAPISID não encontrada' };
+    }
+
+    const apiKey =
+      ytcfgObj && typeof ytcfgObj.get === 'function'
+        ? ytcfgObj.get('INNERTUBE_API_KEY')
+        : '';
+    const context =
+      ytcfgObj && typeof ytcfgObj.get === 'function'
+        ? ytcfgObj.get('INNERTUBE_CONTEXT')
+        : null;
+    const authUser =
+      (ytcfgObj && typeof ytcfgObj.get === 'function' && ytcfgObj.get('SESSION_INDEX')) || '0';
+
+    if (!apiKey || !context) {
+      return {
+        ok: false,
+        items: [],
+        error: 'INNERTUBE_API_KEY ou INNERTUBE_CONTEXT ausente'
+      };
+    }
+
+    let authHeader;
+    try {
+      authHeader = await generateSapisidHashHeader(sapisid, origin);
+    } catch (err) {
+      return {
+        ok: false,
+        items: [],
+        error: err && err.message ? err.message : 'Erro ao gerar SAPISIDHASH'
+      };
+    }
+
+    try {
+      const response = await fetchImpl(
+        `${origin}/youtubei/v1/browse?key=${encodeURIComponent(apiKey)}&prettyPrint=false`,
+        {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: authHeader,
+            'X-Origin': origin,
+            'X-Goog-AuthUser': String(authUser)
+          },
+          body: JSON.stringify({
+            context,
+            browseId: 'FEsubscriptions'
+          })
+        }
+      );
+
+      if (!response.ok) {
+        return {
+          ok: false,
+          items: [],
+          status: response.status,
+          error: `HTTP ${response.status}`
+        };
+      }
+
+      const jsonData = await response.json();
+      const items = extractVideosFromYtData(jsonData);
+      return {
+        ok: true,
+        items,
+        status: response.status
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        items: [],
+        error: err && err.message ? err.message : 'Erro de rede ao consultar inscrições'
+      };
+    }
+  }
+
   const cachedItemsById = new Map();
 
   /**
@@ -577,6 +685,7 @@
     // 1. Intercepta window.fetch para capturar lotes de /youtubei/v1/browse (scroll infinito e navegação SPA)
     if (typeof window.fetch === 'function') {
       const originalFetch = window.fetch;
+      originalFetchRef = originalFetch.bind(window);
       window.fetch = async function zeroSubFetchWrapper(...args) {
         const response = await originalFetch.apply(this, args);
         try {
@@ -637,6 +746,17 @@
           },
           '*'
         );
+      } else if (type === 'CHECK_NEW_VIDEOS') {
+        const result = await fetchSubscriptionsFeedMetadata();
+        window.postMessage(
+          {
+            source: MAIN_SOURCE,
+            type: 'CHECK_NEW_VIDEOS_RESULT',
+            requestId,
+            ...result
+          },
+          '*'
+        );
       }
     });
 
@@ -655,13 +775,15 @@
       extractVideosFromYtData,
       getCookieValue,
       generateSapisidHashHeader,
-      performInnerTubeUnsubscribe
+      performInnerTubeUnsubscribe,
+      fetchSubscriptionsFeedMetadata
     };
   } else if (rootScope) {
     rootScope.ZeroSubInjector = {
       extractVideosFromYtData,
       generateSapisidHashHeader,
-      performInnerTubeUnsubscribe
+      performInnerTubeUnsubscribe,
+      fetchSubscriptionsFeedMetadata
     };
   }
 })(typeof globalThis !== 'undefined' ? globalThis : this);

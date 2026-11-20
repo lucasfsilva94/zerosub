@@ -8,6 +8,7 @@ const DEFAULT_STATE = {
   hideShorts: true,
   hideScheduledLives: true,
   autoMarkWatched: true,
+  autoRefreshMinutes: 10,
   dismissedVideos: [],
   watchLaterVideos: [],
   unsubscribedChannels: [],

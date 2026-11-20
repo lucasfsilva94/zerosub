@@ -251,6 +251,17 @@ html[dark] {
 }
 
 /* Botão Ver depois na barra superior e painel expansível */
+.zerosub-toolbar-btn-new-videos {
+  background-color: var(--zerosub-seen-bg);
+  border-color: transparent;
+  color: var(--zerosub-seen-text);
+  font-weight: 700;
+}
+
+.zerosub-toolbar-btn-new-videos:hover {
+  background-color: var(--zerosub-seen-hover);
+}
+
 .zerosub-toolbar-btn-watch-later {
   background-color: var(--zerosub-watch-later-bg);
   border-color: transparent;
@@ -507,6 +518,12 @@ ytd-browse[page-subtype="subscriptions"].zerosub-feed-empty ytd-section-list-ren
   justify-content: center;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.zerosub-empty-auto-refresh {
+  margin-top: 14px;
+  font-size: 11px;
+  color: var(--zerosub-text-secondary);
 }
 
 /* Toast de feedback no canto inferior */

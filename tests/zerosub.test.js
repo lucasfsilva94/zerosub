@@ -13,7 +13,8 @@ const {
 const {
   extractVideosFromYtData,
   generateSapisidHashHeader,
-  performInnerTubeUnsubscribe
+  performInnerTubeUnsubscribe,
+  fetchSubscriptionsFeedMetadata
 } = require('../content/injector.js');
 
 const {
@@ -29,6 +30,9 @@ const {
   shouldShowEmptyState,
   resolveClearedTimestamp,
   getDisplayClearedTimestamp,
+  normalizeAutoRefreshMinutes,
+  evaluateRemoteNewVideos,
+  decideAutoRefreshAction,
   recordNotInterestedVideo,
   getUnsubscribeSuggestions,
   removeChannelFromNotInterested,
@@ -51,7 +55,8 @@ const {
   markWatchLaterAsSeenInStorage,
   markWatchLaterNotInterestedInStorage,
   removeChannelFromWatchLaterInStorage,
-  createPopupTwoStepConfirmation
+  createPopupTwoStepConfirmation,
+  normalizePopupAutoRefreshMinutes
 } = require('../popup/popup.js');
 
 test('1.1 manifest.json é um JSON Manifest V3 válido com scripts e permissões exigidos', () => {
@@ -1196,6 +1201,154 @@ test('7.6 cards fantasmas (sem videoId, ocultos nativamente pelo YouTube ou anin
     closest: (sel) => (sel.includes('ytd-rich-shelf-renderer[is-shorts]') ? {} : null)
   });
   assert.equal(isCardEligibleForFeed(shortsShelfCard, browseRoot), false);
+});
+
+test('8.1 autoRefreshMinutes padrão em background.js, seletor no popup e fetchSubscriptionsFeedMetadata silencioso em injector.js', async () => {
+  // 1. background.js inicializa autoRefreshMinutes = 10 e preserva preferência existente
+  const patch = buildInitialStatePatch({}, 1763600000000);
+  assert.equal(patch.autoRefreshMinutes, 10);
+
+  const existingPatch = buildInitialStatePatch(
+    { installTimestamp: 1000, autoRefreshMinutes: 30 },
+    2000
+  );
+  assert.equal(existingPatch.autoRefreshMinutes, undefined);
+
+  // 2. Normalização dos intervalos permitidos (0, 5, 10, 15, 30, 60)
+  assert.equal(normalizeAutoRefreshMinutes(undefined), 10);
+  assert.equal(normalizeAutoRefreshMinutes(0), 0);
+  assert.equal(normalizeAutoRefreshMinutes('15'), 15);
+  assert.equal(normalizeAutoRefreshMinutes(60), 60);
+  assert.equal(normalizeAutoRefreshMinutes(-5), 0);
+  assert.equal(normalizePopupAutoRefreshMinutes('30'), 30);
+
+  // 3. Popup HTML possui seletor com todos os intervalos
+  const popupHtml = fs.readFileSync(path.join(__dirname, '..', 'popup', 'popup.html'), 'utf8');
+  assert.ok(popupHtml.includes('id="select-auto-refresh"'));
+  assert.ok(popupHtml.includes('value="0"'));
+  assert.ok(popupHtml.includes('value="5"'));
+  assert.ok(popupHtml.includes('value="10"'));
+  assert.ok(popupHtml.includes('value="15"'));
+  assert.ok(popupHtml.includes('value="30"'));
+  assert.ok(popupHtml.includes('value="60"'));
+
+  // 4. fetchSubscriptionsFeedMetadata consulta browseId FEsubscriptions e extrai itens
+  let capturedBody = null;
+  const mockYtcfg = {
+    get(key) {
+      if (key === 'INNERTUBE_API_KEY') return 'AIzaTestBrowseKey';
+      if (key === 'INNERTUBE_CONTEXT') return { client: { clientName: 'WEB' } };
+      return null;
+    }
+  };
+
+  const res = await fetchSubscriptionsFeedMetadata({
+    cookieString: 'SAPISID=TEST_COOKIE_123',
+    origin: 'https://www.youtube.com',
+    ytcfgObj: mockYtcfg,
+    fetchImpl: async (_url, init) => {
+      capturedBody = JSON.parse(init.body);
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            items: [
+              {
+                videoRenderer: {
+                  videoId: 'remote_new_1',
+                  title: { simpleText: 'Vídeo Novo' },
+                  publishedTimeText: { simpleText: 'há 2 minutos' }
+                }
+              }
+            ]
+          };
+        }
+      };
+    }
+  });
+
+  assert.equal(res.ok, true);
+  assert.equal(capturedBody.browseId, 'FEsubscriptions');
+  assert.equal(res.items.length, 1);
+  assert.equal(res.items[0].videoId, 'remote_new_1');
+});
+
+test('8.2 evaluateRemoteNewVideos e decideAutoRefreshAction evitam recarregar sem novidades ou durante interação', () => {
+  const now = 1763600000000;
+  const baseline = now - 30 * 60 * 1000; // 30 min atrás
+  const state = {
+    installTimestamp: baseline,
+    zeroSubEnabled: true,
+    hideShorts: true,
+    hideScheduledLives: true,
+    dismissedVideos: new Set(['vid_seen']),
+    watchLaterVideos: [{ videoId: 'vid_wl' }],
+    unsubscribedChannels: new Set(),
+    baselineAnchorIds: new Set(['vid_anchor'])
+  };
+
+  const remoteItems = [
+    { videoId: 'vid_brand_new', publishedTimeText: 'há 3 minutos', isShort: false, isUpcoming: false },
+    { videoId: 'vid_already_dom', publishedTimeText: 'há 5 minutos', isShort: false, isUpcoming: false },
+    { videoId: 'vid_wl', publishedTimeText: 'há 10 minutos', isShort: false, isUpcoming: false },
+    { videoId: 'vid_seen', publishedTimeText: 'há 12 minutos', isShort: false, isUpcoming: false },
+    { videoId: 'vid_anchor', publishedTimeText: 'há 40 minutos', isShort: false, isUpcoming: false }
+  ];
+
+  const evalRes = evaluateRemoteNewVideos(remoteItems, new Set(['vid_already_dom']), state, now);
+  assert.equal(evalRes.totalRemotePending, 2); // vid_brand_new + vid_already_dom
+  assert.equal(evalRes.newlyArrivedCount, 1); // apenas vid_brand_new é novidade em relação ao DOM
+  assert.deepEqual(evalRes.newVideoIds, ['vid_brand_new']);
+
+  // 1. Sem novidades -> não recarrega
+  assert.deepEqual(
+    decideAutoRefreshAction({ remoteCheckOk: true, newlyArrivedCount: 0, currentPendingCount: 0 }),
+    { action: 'none', newCount: 0 }
+  );
+
+  // 2. Com novidades + fila vazia + sem painéis abertos -> auto-reload
+  assert.deepEqual(
+    decideAutoRefreshAction({
+      remoteCheckOk: true,
+      newlyArrivedCount: 2,
+      currentPendingCount: 0,
+      watchLaterPanelOpen: false,
+      suggestionsPanelOpen: false
+    }),
+    { action: 'auto-reload', newCount: 2 }
+  );
+
+  // 3. Com novidades + painel Ver depois aberto -> notify-banner (não interrompe o usuário!)
+  assert.deepEqual(
+    decideAutoRefreshAction({
+      remoteCheckOk: true,
+      newlyArrivedCount: 2,
+      currentPendingCount: 0,
+      watchLaterPanelOpen: true
+    }),
+    { action: 'notify-banner', newCount: 2 }
+  );
+
+  // 4. Com novidades + usuário triando fila -> notify-banner
+  assert.deepEqual(
+    decideAutoRefreshAction({
+      remoteCheckOk: true,
+      newlyArrivedCount: 1,
+      currentPendingCount: 3
+    }),
+    { action: 'notify-banner', newCount: 1 }
+  );
+
+  // 5. Falha silenciosa em Inbox Zero ocioso -> reload-fallback; se ocupado -> none
+  assert.deepEqual(
+    decideAutoRefreshAction({ remoteCheckOk: false, currentPendingCount: 0 }),
+    { action: 'reload-fallback', newCount: 0 }
+  );
+  assert.deepEqual(
+    decideAutoRefreshAction({ remoteCheckOk: false, currentPendingCount: 0, watchLaterPanelOpen: true }),
+    { action: 'none', newCount: 0 }
+  );
 });
 
 
