@@ -21,9 +21,6 @@
 
 Ao instalar a extensão, um **Marco Zero (`installTimestamp`)** é definido automaticamente: todo o histórico antigo fica oculto e apenas vídeos publicados a partir daquele momento entram na sua fila, acompanhados de botões integrados em cada card para **marcar como visto** ou **cancelar a inscrição do canal** sem sair do feed.
 
-> [!NOTE]
-> Especificação técnica completa disponível em [`openspec/specs/`](openspec/specs/) e histórico da change em [`openspec/changes/archive/2026-11-18-zerosub-chrome-extension/`](openspec/changes/archive/2026-11-18-zerosub-chrome-extension/): [`proposal.md`](openspec/changes/archive/2026-11-18-zerosub-chrome-extension/proposal.md) (escopo e motivação), [`design.md`](openspec/changes/archive/2026-11-18-zerosub-chrome-extension/design.md) (decisões arquiteturais Dual-World e InnerTube) e [`specs/`](openspec/specs/) (requisitos por capacidade).
-
 ---
 
 ## ⚙️ Funcionalidades
