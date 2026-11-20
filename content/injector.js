@@ -101,6 +101,8 @@
         node.videoRenderer || node.gridVideoRenderer || node.compactVideoRenderer;
       if (videoRenderer && typeof videoRenderer.videoId === 'string') {
         const videoId = videoRenderer.videoId;
+        const title = extractText(videoRenderer.title).trim();
+        let durationText = extractText(videoRenderer.lengthText).trim();
         const { channelId, channelHandle, channelName } = extractChannelInfo(videoRenderer);
         const publishedTimeText = extractText(videoRenderer.publishedTimeText);
 
@@ -132,8 +134,11 @@
             if (statusRenderer) {
               if (statusRenderer.style === 'UPCOMING') isUpcoming = true;
               if (statusRenderer.style === 'LIVE') isLive = true;
-              if (statusRenderer.style === 'SHORTS') {
-                // Marcado explicitamente como Short
+              if (!durationText && statusRenderer.style === 'DEFAULT') {
+                const candidateDuration = extractText(statusRenderer.text).trim();
+                if (/^\d{1,2}:\d{2}(?::\d{2})?$/.test(candidateDuration)) {
+                  durationText = candidateDuration;
+                }
               }
             }
           }
@@ -146,6 +151,8 @@
 
         results.set(videoId, {
           videoId,
+          title,
+          durationText,
           channelId,
           channelHandle,
           channelName,
@@ -164,6 +171,8 @@
         if (!results.has(videoId)) {
           results.set(videoId, {
             videoId,
+            title: extractText(reelRenderer.headline).trim(),
+            durationText: '',
             channelId: '',
             channelHandle: '',
             channelName: '',
@@ -180,6 +189,12 @@
       const lockup = node.lockupViewModel;
       if (lockup && typeof lockup.contentId === 'string') {
         const videoId = lockup.contentId;
+        const title = extractText(
+          lockup.metadata &&
+            lockup.metadata.lockupMetadataViewModel &&
+            lockup.metadata.lockupMetadataViewModel.title
+        ).trim();
+        let durationText = '';
         let publishedTimeText = '';
         let channelId = '';
         let channelHandle = '';
@@ -201,7 +216,7 @@
               const textContent = extractText(part.text);
               if (
                 textContent &&
-                (/(há\s+\d+|ago\b|streamed|transmitido|programado|scheduled|estreia|premiere)/i.test(
+                (/(há\s+(?:\d+|um|uma|poucos)|agora mesmo|just now|a moment ago|ago\b|streamed|transmitido|estreou|programado|scheduled|estreia|premiere)/i.test(
                   textContent
                 ))
               ) {
@@ -212,6 +227,36 @@
                 /(programado|scheduled|estreia|premiere|em breve|upcoming)/i.test(textContent)
               ) {
                 isUpcoming = true;
+              }
+              if (textContent && /\b(assistindo|watching)\b/i.test(textContent)) {
+                isLive = true;
+              }
+            }
+          }
+        }
+
+        const thumbOverlays =
+          lockup.contentImage &&
+          lockup.contentImage.thumbnailViewModel &&
+          lockup.contentImage.thumbnailViewModel.overlays;
+        if (Array.isArray(thumbOverlays)) {
+          for (const overlay of thumbOverlays) {
+            const badges =
+              overlay &&
+              overlay.thumbnailBottomOverlayViewModel &&
+              overlay.thumbnailBottomOverlayViewModel.badges;
+            if (!Array.isArray(badges)) continue;
+            for (const badge of badges) {
+              const vm = badge && badge.thumbnailBadgeViewModel;
+              if (!vm) continue;
+              const badgeText = (vm.text || '').trim();
+              if (
+                vm.badgeStyle === 'THUMBNAIL_OVERLAY_BADGE_STYLE_LIVE' ||
+                /^(ao vivo|live)$/i.test(badgeText)
+              ) {
+                isLive = true;
+              } else if (!durationText && /^\d{1,2}:\d{2}(?::\d{2})?$/.test(badgeText)) {
+                durationText = badgeText;
               }
             }
           }
@@ -241,6 +286,8 @@
         if (!results.has(videoId)) {
           results.set(videoId, {
             videoId,
+            title,
+            durationText,
             channelId,
             channelHandle,
             channelName,
@@ -471,12 +518,20 @@
     }
   }
 
+  const cachedItemsById = new Map();
+
   /**
-   * Emite um lote de metadados extraídos para o content script (ISOLATED world).
+   * Emite um lote de metadados extraídos para o content script (ISOLATED world)
+   * e mantém cache local para reenvio quando o content script solicita metadados iniciais.
    * @param {any[]} items
    */
   function emitMetadataBatch(items) {
     if (!Array.isArray(items) || items.length === 0) return;
+    for (const item of items) {
+      if (item && item.videoId) {
+        cachedItemsById.set(item.videoId, item);
+      }
+    }
     if (typeof window === 'undefined' || typeof window.postMessage !== 'function') return;
 
     window.postMessage(
@@ -490,14 +545,22 @@
   }
 
   /**
-   * Lê window.ytInitialData se presente e publica os metadados.
+   * Lê window.ytInitialData se presente e publica os metadados (incluindo itens já interceptados via fetch).
    */
   function scanInitialData() {
     if (typeof window === 'undefined') return;
     try {
+      const merged = new Map();
       if (window.ytInitialData) {
-        const items = extractVideosFromYtData(window.ytInitialData);
-        emitMetadataBatch(items);
+        for (const item of extractVideosFromYtData(window.ytInitialData)) {
+          if (item && item.videoId) merged.set(item.videoId, item);
+        }
+      }
+      for (const [id, item] of cachedItemsById.entries()) {
+        merged.set(id, item);
+      }
+      if (merged.size > 0) {
+        emitMetadataBatch(Array.from(merged.values()));
       }
     } catch (err) {
       console.warn('[ZeroSub] Erro ao ler ytInitialData:', err);

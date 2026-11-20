@@ -13,6 +13,7 @@
   const MAIN_SOURCE = 'ZEROSUB_MAIN';
   const ISOLATED_SOURCE = 'ZEROSUB_ISOLATED';
   const MAX_DISMISSED_VIDEOS = 5000;
+  const MAX_WATCH_LATER_VIDEOS = 500;
   const MAX_BASELINE_ANCHORS = 30;
   const CONFIRM_TIMEOUT_MS = 4000;
   const NOT_INTERESTED_THRESHOLD = 3;
@@ -229,6 +230,11 @@
       return { hidden: true, reason: 'dismissed' };
     }
 
+    const watchLaterSet = getWatchLaterIdSet(state.watchLaterVideos);
+    if (cardMeta.videoId && watchLaterSet.has(cardMeta.videoId)) {
+      return { hidden: true, reason: 'watch-later' };
+    }
+
     if (state.hideShorts && cardMeta.isShort) {
       return { hidden: true, reason: 'short' };
     }
@@ -268,21 +274,34 @@
     const decisions = [];
 
     for (const cardMeta of cardsMeta) {
+      const isNonChronological = Boolean(
+        cardMeta.isLiveNow || cardMeta.isUpcoming || cardMeta.isShort
+      );
+
       if (state.zeroSubEnabled) {
-        if (cutoffReached) {
-          decisions.push({ hidden: true, reason: 'after-cutoff' });
+        if (cardMeta.videoId && anchorSet.has(cardMeta.videoId)) {
+          if (!isNonChronological) {
+            cutoffReached = true;
+          }
+          decisions.push({ hidden: true, reason: 'baseline-anchor' });
           continue;
         }
 
-        if (cardMeta.videoId && anchorSet.has(cardMeta.videoId)) {
-          cutoffReached = true;
-          decisions.push({ hidden: true, reason: 'baseline-anchor' });
-          continue;
+        if (cutoffReached) {
+          const isExplicitlyNewer =
+            typeof cardMeta.publishedTimestamp === 'number' &&
+            typeof state.installTimestamp === 'number' &&
+            cardMeta.publishedTimestamp >= state.installTimestamp;
+
+          if (!isExplicitlyNewer) {
+            decisions.push({ hidden: true, reason: 'after-cutoff' });
+            continue;
+          }
         }
       }
 
       const decision = evaluateCardVisibility(cardMeta, state);
-      if (state.zeroSubEnabled && decision.reason === 'before-baseline') {
+      if (state.zeroSubEnabled && !isNonChronological && decision.reason === 'before-baseline') {
         cutoffReached = true;
       }
 
@@ -302,6 +321,127 @@
       cutoffReached,
       shouldHideContinuation
     };
+  }
+
+  /**
+   * Verifica se um nó do DOM pertence à UI injetada pelo próprio ZeroSub,
+   * evitando que mutações da extensão disparem loops infinitos no MutationObserver.
+   *
+   * @param {Node | null} node
+   * @returns {boolean}
+   */
+  function isZeroSubOwnedNode(node) {
+    if (!node) return false;
+    const el = node.nodeType === 1 ? node : node.parentElement;
+    if (!el || typeof el.closest !== 'function') return false;
+    return Boolean(
+      el.closest(
+        '#zerosub-top-toolbar, #zerosub-watch-later-panel, #zerosub-suggestions-panel, #zerosub-empty-wrapper, #zerosub-toast, .zerosub-card-actions'
+      )
+    );
+  }
+
+  /**
+   * Decide se o estado vazio "Inbox Zero" deve ser exibido.
+   * Nunca oculta o grid nativo enquanto totalCards === 0 (página ainda hidratando após reload).
+   *
+   * @param {boolean} zeroSubEnabled
+   * @param {number} visibleCount
+   * @param {number} totalCards
+   * @returns {boolean}
+   */
+  function shouldShowEmptyState(zeroSubEnabled, visibleCount, totalCards) {
+    return Boolean(zeroSubEnabled && totalCards > 0 && visibleCount === 0);
+  }
+
+  /**
+   * Determina o timestamp em que a fila ficou efetivamente limpa ("Inbox Zero").
+   * Atualiza para `now` quando a fila transita de > 0 vídeos pendentes para 0 vídeos,
+   * preservando o horário registrado em recarregamentos posteriores enquanto continuar zerada.
+   *
+   * @param {{
+   *   zeroSubEnabled: boolean,
+   *   prevPendingCount: number,
+   *   nextPendingCount: number,
+   *   totalCards: number,
+   *   currentLastClearedAt: number | null | undefined,
+   *   installTimestamp: number,
+   *   now?: number
+   * }} params
+   * @returns {number | null}
+   */
+  function resolveClearedTimestamp({
+    zeroSubEnabled,
+    prevPendingCount,
+    nextPendingCount,
+    totalCards,
+    currentLastClearedAt,
+    installTimestamp,
+    now = Date.now()
+  }) {
+    const existing =
+      typeof currentLastClearedAt === 'number' && !Number.isNaN(currentLastClearedAt)
+        ? currentLastClearedAt
+        : null;
+
+    if (!zeroSubEnabled || totalCards <= 0) {
+      return existing;
+    }
+
+    if (nextPendingCount === 0 && prevPendingCount > 0) {
+      return now;
+    }
+
+    return existing;
+  }
+
+  /**
+   * Retorna o horário efetivo para exibição no banner "Sua fila está limpa desde ...".
+   * Prioriza `lastClearedAt` quando registrado após o Marco Zero; caso contrário, usa o
+   * evento mais recente entre o Marco Zero, o último item salvo em "Ver depois" e o último "Sem interesse".
+   *
+   * @param {{
+   *   installTimestamp: number,
+   *   lastClearedAt?: number | null,
+   *   watchLaterVideos?: Array<{ savedAt?: number }>,
+   *   notInterestedByChannel?: Record<string, { updatedAt?: number }>
+   * }} state
+   * @returns {number}
+   */
+  function getDisplayClearedTimestamp(state = {}) {
+    const baseline =
+      typeof state.installTimestamp === 'number' && !Number.isNaN(state.installTimestamp)
+        ? state.installTimestamp
+        : Date.now();
+
+    const recorded =
+      typeof state.lastClearedAt === 'number' && !Number.isNaN(state.lastClearedAt)
+        ? state.lastClearedAt
+        : null;
+
+    if (recorded !== null && recorded > baseline) {
+      return recorded;
+    }
+
+    let latest = recorded !== null ? Math.max(baseline, recorded) : baseline;
+
+    if (Array.isArray(state.watchLaterVideos)) {
+      for (const item of state.watchLaterVideos) {
+        if (item && typeof item.savedAt === 'number' && item.savedAt > latest) {
+          latest = item.savedAt;
+        }
+      }
+    }
+
+    if (state.notInterestedByChannel && typeof state.notInterestedByChannel === 'object') {
+      for (const entry of Object.values(state.notInterestedByChannel)) {
+        if (entry && typeof entry.updatedAt === 'number' && entry.updatedAt > latest) {
+          latest = entry.updatedAt;
+        }
+      }
+    }
+
+    return latest;
   }
 
   /**
@@ -440,6 +580,117 @@
   }
 
   /**
+   * Constrói a URL determinística de thumbnail de um vídeo do YouTube.
+   * @param {string} videoId
+   * @returns {string}
+   */
+  function buildVideoThumbnailUrl(videoId) {
+    if (!videoId || typeof videoId !== 'string') return '';
+    return `https://i.ytimg.com/vi/${encodeURIComponent(videoId)}/mqdefault.jpg`;
+  }
+
+  /**
+   * Extrai um Set de videoIds a partir de watchLaterVideos (Set<string>, string[] ou Array<{ videoId }>).
+   * @param {Set<string> | Array<string | { videoId?: string }>} watchLaterVideos
+   * @returns {Set<string>}
+   */
+  function getWatchLaterIdSet(watchLaterVideos) {
+    if (watchLaterVideos instanceof Set) return watchLaterVideos;
+    const set = new Set();
+    if (!Array.isArray(watchLaterVideos)) return set;
+    for (const item of watchLaterVideos) {
+      if (typeof item === 'string' && item) {
+        set.add(item);
+      } else if (item && typeof item === 'object' && item.videoId) {
+        set.add(item.videoId);
+      }
+    }
+    return set;
+  }
+
+  /**
+   * Insere ou atualiza um vídeo na fila "Ver depois", deduplicando por videoId e posicionando o mais recente no topo.
+   * @param {Array<Record<string, any>>} currentList
+   * @param {Record<string, any>} videoInfo
+   * @param {number} [now=Date.now()]
+   * @param {number} [maxItems=MAX_WATCH_LATER_VIDEOS]
+   */
+  function upsertWatchLaterVideo(
+    currentList = [],
+    videoInfo = {},
+    now = Date.now(),
+    maxItems = MAX_WATCH_LATER_VIDEOS
+  ) {
+    const safeList = Array.isArray(currentList) ? currentList : [];
+    if (!videoInfo || !videoInfo.videoId) return [...safeList];
+
+    const existing = safeList.find((item) => item && item.videoId === videoInfo.videoId);
+    const rest = safeList.filter((item) => item && item.videoId !== videoInfo.videoId);
+
+    const entry = {
+      videoId: videoInfo.videoId,
+      title: videoInfo.title || (existing && existing.title) || `Vídeo ${videoInfo.videoId}`,
+      thumbnailUrl:
+        videoInfo.thumbnailUrl ||
+        (existing && existing.thumbnailUrl) ||
+        buildVideoThumbnailUrl(videoInfo.videoId),
+      durationText: videoInfo.durationText || (existing && existing.durationText) || '',
+      channelId: videoInfo.channelId || (existing && existing.channelId) || '',
+      channelHandle: videoInfo.channelHandle || (existing && existing.channelHandle) || '',
+      channelKey:
+        videoInfo.channelKey ||
+        videoInfo.channelId ||
+        videoInfo.channelHandle ||
+        (existing && existing.channelKey) ||
+        '',
+      channelName:
+        videoInfo.channelName ||
+        (existing && existing.channelName) ||
+        videoInfo.channelHandle ||
+        videoInfo.channelKey ||
+        '',
+      publishedTimestamp:
+        typeof videoInfo.publishedTimestamp === 'number'
+          ? videoInfo.publishedTimestamp
+          : existing && typeof existing.publishedTimestamp === 'number'
+            ? existing.publishedTimestamp
+            : null,
+      savedAt: now
+    };
+
+    const next = [entry, ...rest];
+    return next.length > maxItems ? next.slice(0, maxItems) : next;
+  }
+
+  /**
+   * Remove um vídeo específico da lista "Ver depois" pelo videoId.
+   * @param {Array<Record<string, any>>} currentList
+   * @param {string} videoId
+   */
+  function removeWatchLaterVideo(currentList = [], videoId = '') {
+    if (!Array.isArray(currentList)) return [];
+    if (!videoId) return [...currentList];
+    return currentList.filter((item) => item && item.videoId !== videoId);
+  }
+
+  /**
+   * Remove todos os vídeos de um canal da lista "Ver depois" (usado ao desinscrever).
+   * @param {Array<Record<string, any>>} currentList
+   * @param {{ channelKey?: string, channelId?: string, channelHandle?: string }} info
+   */
+  function removeChannelFromWatchLater(currentList = [], info = {}) {
+    if (!Array.isArray(currentList)) return [];
+    return currentList.filter((item) => {
+      if (!item) return false;
+      const matches =
+        (info.channelKey && item.channelKey === info.channelKey) ||
+        (info.channelId && item.channelId === info.channelId) ||
+        (info.channelHandle && item.channelHandle === info.channelHandle);
+      return !matches;
+    });
+  }
+
+  /**
    * Cria um controlador de confirmação em 2 cliques para o botão "Desinscrever".
    * No 1º clique entra no estado "Confirmar?" por 4 segundos; no 2º clique confirma a ação.
    *
@@ -509,14 +760,17 @@
 
   const runtimeState = {
     installTimestamp: Date.now(),
+    lastClearedAt: null,
     zeroSubEnabled: true,
     hideShorts: true,
     hideScheduledLives: true,
     autoMarkWatched: true,
     dismissedVideos: new Set(),
+    watchLaterVideos: [],
     unsubscribedChannels: new Set(),
     baselineAnchorIds: new Set(),
     notInterestedByChannel: {},
+    watchLaterPanelOpen: false,
     suggestionsPanelOpen: false,
     pendingCount: 0,
     loaded: false
@@ -525,6 +779,7 @@
   let feedObserver = null;
   let scheduledScanFrame = null;
   let lastAutoMarkedVideoId = '';
+  let lastPersistedPendingCount = null;
 
   /**
    * Carrega o estado salvo em chrome.storage.local.
@@ -537,11 +792,13 @@
 
     const data = await chrome.storage.local.get([
       'installTimestamp',
+      'lastClearedAt',
       'zeroSubEnabled',
       'hideShorts',
       'hideScheduledLives',
       'autoMarkWatched',
       'dismissedVideos',
+      'watchLaterVideos',
       'unsubscribedChannels',
       'baselineAnchorIds',
       'notInterestedByChannel',
@@ -555,6 +812,15 @@
       await chrome.storage.local.set({ installTimestamp: runtimeState.installTimestamp });
     }
 
+    runtimeState.lastClearedAt =
+      typeof data.lastClearedAt === 'number' && !Number.isNaN(data.lastClearedAt)
+        ? data.lastClearedAt
+        : null;
+    runtimeState.pendingCount =
+      typeof data.pendingCount === 'number' && !Number.isNaN(data.pendingCount)
+        ? data.pendingCount
+        : 0;
+
     runtimeState.zeroSubEnabled = data.zeroSubEnabled !== false;
     runtimeState.hideShorts = data.hideShorts !== false;
     runtimeState.hideScheduledLives = data.hideScheduledLives !== false;
@@ -562,6 +828,9 @@
     runtimeState.dismissedVideos = new Set(
       Array.isArray(data.dismissedVideos) ? data.dismissedVideos : []
     );
+    runtimeState.watchLaterVideos = Array.isArray(data.watchLaterVideos)
+      ? data.watchLaterVideos
+      : [];
     runtimeState.unsubscribedChannels = new Set(
       Array.isArray(data.unsubscribedChannels) ? data.unsubscribedChannels : []
     );
@@ -632,10 +901,10 @@
       cardEl.setAttribute('data-zerosub-channel-key', channelKey);
     }
 
-    // Texto de data/metadados no DOM
+    // Texto de data/metadados no DOM (suporta layout clássico e yt-lockup-view-model / -wiz)
     const metadataSpans = Array.from(
       cardEl.querySelectorAll(
-        '#metadata-line span, .yt-content-metadata-view-model__metadata-text, ytd-video-meta-block span'
+        '#metadata-line span, .yt-content-metadata-view-model__metadata-text, .yt-content-metadata-view-model-wiz__metadata-text, yt-content-metadata-view-model span, ytd-video-meta-block span'
       )
     );
     const metadataTexts = metadataSpans.map((s) => (s.textContent || '').trim()).filter(Boolean);
@@ -648,17 +917,29 @@
       Boolean(cardEl.querySelector('a[href*="/shorts/"], [overlay-style="SHORTS"], ytd-reel-item-renderer, ytm-shorts-lockup-view-model'));
 
     // Detecta Live em andamento vs Live agendada/futura
+    const badgeTexts = Array.from(
+      cardEl.querySelectorAll(
+        'ytd-badge-supported-renderer, badge-shape, .badge-shape-wiz__text, .yt-badge-shape__text'
+      )
+    ).map((el) => (el.textContent || '').trim());
+
     const hasLiveBadge = Boolean(
       (cached && cached.isLive) ||
         cardEl.querySelector(
-          '[overlay-style="LIVE"], .badge-style-type-live-now, .badge-style-type-live-now-alternate'
-        )
+          '[overlay-style="LIVE"], .badge-style-type-live-now, .badge-style-type-live-now-alternate, .yt-badge-shape--live, .yt-badge-shape--thumbnail-live, .badge-shape-wiz--live, .badge-shape-wiz--thumbnail-live, [aria-label="AO VIVO"], [aria-label="LIVE"]'
+        ) ||
+        badgeTexts.some((t) => /^(ao vivo|live)$/i.test(t)) ||
+        /\b(assistindo|watching)\b/i.test(combinedDomText)
     );
 
+    const actionAriaText = Array.from(cardEl.querySelectorAll('button[aria-label]'))
+      .map((b) => b.getAttribute('aria-label') || '')
+      .join(' | ');
+
     const hasUpcomingOverlay = Boolean(
-      cardEl.querySelector(
-        '[overlay-style="UPCOMING"], ytd-toggle-button-renderer[is-icon-button]'
-      ) || isScheduledLiveText(combinedDomText)
+      cardEl.querySelector('[overlay-style="UPCOMING"]') ||
+        isScheduledLiveText(combinedDomText) ||
+        isScheduledLiveText(actionAriaText)
     );
 
     const isUpcoming = Boolean((cached && cached.isUpcoming) || hasUpcomingOverlay);
@@ -698,8 +979,37 @@
 
     const channelName = (cached && cached.channelName) || domChannelName || channelHandle || channelKey;
 
+    const titleEl = cardEl.querySelector(
+      'a#video-title-link, a#video-title, #video-title, a.yt-lockup-metadata-view-model__title, a.yt-lockup-metadata-view-model-wiz__title, h3 a[href*="/watch?v="], h3'
+    );
+    const domTitle = titleEl
+      ? (titleEl.getAttribute('title') || titleEl.textContent || '').trim()
+      : '';
+    const title = domTitle || (cached && cached.title) || (videoId ? `Vídeo ${videoId}` : '');
+
+    let durationText = (cached && cached.durationText) || '';
+    if (!durationText) {
+      const durationCandidates = Array.from(
+        cardEl.querySelectorAll(
+          'ytd-thumbnail-overlay-time-status-renderer #text, ytd-thumbnail-overlay-time-status-renderer, badge-shape .yt-badge-shape__text, .badge-shape-wiz__text'
+        )
+      );
+      for (const el of durationCandidates) {
+        const txt = (el.textContent || '').trim();
+        if (/^\d{1,2}:\d{2}(?::\d{2})?$/.test(txt)) {
+          durationText = txt;
+          break;
+        }
+      }
+    }
+
+    const thumbnailUrl = buildVideoThumbnailUrl(videoId);
+
     return {
       videoId,
+      title,
+      durationText,
+      thumbnailUrl,
       channelId,
       channelHandle,
       channelKey,
@@ -791,6 +1101,112 @@
   }
 
   /**
+   * Salva um vídeo do feed na fila "Ver depois" e remove o card da fila principal sem adicioná-lo a dismissedVideos.
+   * @param {ReturnType<typeof inspectCardElement>} cardMeta
+   * @param {Element} cardEl
+   */
+  async function saveVideoToWatchLater(cardMeta, cardEl) {
+    if (!cardMeta || !cardMeta.videoId) return;
+
+    const updatedList = upsertWatchLaterVideo(runtimeState.watchLaterVideos, cardMeta);
+    runtimeState.watchLaterVideos = updatedList;
+
+    if (cardEl) {
+      cardEl.classList.add('zerosub-card-dismissing');
+    }
+
+    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+      await chrome.storage.local.set({ watchLaterVideos: updatedList });
+    }
+
+    setTimeout(() => {
+      if (cardEl) {
+        cardEl.classList.remove('zerosub-card-dismissing');
+        cardEl.classList.add('zerosub-hidden');
+      }
+      updateFeedCounters();
+      renderWatchLaterPanel();
+    }, 220);
+
+    updateToolbarUI();
+    renderWatchLaterPanel();
+    showZeroSubToast(`Salvo em "Ver depois" (${updatedList.length}).`);
+  }
+
+  /**
+   * Marca um vídeo da lista "Ver depois" como visto (remove de watchLaterVideos e adiciona em dismissedVideos).
+   * @param {Record<string, any>} item
+   */
+  async function markWatchLaterVideoSeen(item) {
+    if (!item || !item.videoId) return;
+
+    runtimeState.watchLaterVideos = removeWatchLaterVideo(
+      runtimeState.watchLaterVideos,
+      item.videoId
+    );
+    runtimeState.dismissedVideos.add(item.videoId);
+
+    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+      const data = await chrome.storage.local.get(['dismissedVideos']);
+      const updatedDismissed = appendDismissedVideo(data.dismissedVideos || [], item.videoId);
+      await chrome.storage.local.set({
+        watchLaterVideos: runtimeState.watchLaterVideos,
+        dismissedVideos: updatedDismissed
+      });
+    }
+
+    updateToolbarUI();
+    renderWatchLaterPanel();
+    updateFeedCounters();
+    showZeroSubToast('Vídeo marcado como visto.');
+  }
+
+  /**
+   * Marca um vídeo da lista "Ver depois" como "Sem interesse", atualizando dismissedVideos e notInterestedByChannel.
+   * @param {Record<string, any>} item
+   */
+  async function markWatchLaterVideoNotInterested(item) {
+    if (!item || !item.videoId) return;
+
+    runtimeState.watchLaterVideos = removeWatchLaterVideo(
+      runtimeState.watchLaterVideos,
+      item.videoId
+    );
+    runtimeState.dismissedVideos.add(item.videoId);
+
+    const { updatedMap, entry, count, reachedThreshold } = recordNotInterestedVideo(
+      runtimeState.notInterestedByChannel,
+      item
+    );
+    runtimeState.notInterestedByChannel = updatedMap;
+
+    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+      const data = await chrome.storage.local.get(['dismissedVideos']);
+      const updatedDismissed = appendDismissedVideo(data.dismissedVideos || [], item.videoId);
+      await chrome.storage.local.set({
+        watchLaterVideos: runtimeState.watchLaterVideos,
+        dismissedVideos: updatedDismissed,
+        notInterestedByChannel: updatedMap
+      });
+    }
+
+    updateToolbarUI();
+    renderWatchLaterPanel();
+    renderSuggestionsPanel();
+    updateFeedCounters();
+
+    if (reachedThreshold && entry) {
+      showZeroSubToast(
+        `Você marcou ${count} vídeos de "${entry.channelName}" como sem interesse. Confira as Sugestões para desinscrever.`
+      );
+    } else if (entry && count < NOT_INTERESTED_THRESHOLD) {
+      showZeroSubToast(
+        `Sem interesse registrado (${count}/${NOT_INTERESTED_THRESHOLD} para sugerir desinscrição de ${entry.channelName}).`
+      );
+    }
+  }
+
+  /**
    * Solicita ao MAIN world (injector.js) o cancelamento da inscrição via InnerTube API.
    * Caso falhe, executa fallback UI abrindo/acionando o canal ou notificando o usuário.
    *
@@ -805,13 +1221,17 @@
       buttonEl.classList.remove('zerosub-btn-confirming');
     }
 
-    // Oculta imediatamente todos os cards desse canal na tela e limpa da lista de sugestões
+    // Oculta imediatamente todos os cards desse canal na tela e limpa de sugestões e "Ver depois"
     if (channelId) runtimeState.unsubscribedChannels.add(channelId);
     if (channelHandle) runtimeState.unsubscribedChannels.add(channelHandle);
     if (channelKey) runtimeState.unsubscribedChannels.add(channelKey);
 
     runtimeState.notInterestedByChannel = removeChannelFromNotInterested(
       runtimeState.notInterestedByChannel,
+      channelInfo
+    );
+    runtimeState.watchLaterVideos = removeChannelFromWatchLater(
+      runtimeState.watchLaterVideos,
       channelInfo
     );
 
@@ -823,13 +1243,16 @@
       if (channelKey) list.add(channelKey);
       await chrome.storage.local.set({
         unsubscribedChannels: Array.from(list),
-        notInterestedByChannel: runtimeState.notInterestedByChannel
+        notInterestedByChannel: runtimeState.notInterestedByChannel,
+        watchLaterVideos: runtimeState.watchLaterVideos
       });
     }
 
     hideAllCardsForChannel(channelKey, channelId, channelHandle);
     updateToolbarUI();
+    renderWatchLaterPanel();
     renderSuggestionsPanel();
+    updateFeedCounters();
 
     // Envia comando para o MAIN world executar o POST /youtubei/v1/subscription/unsubscribe
     const apiResult = await requestMainWorldUnsubscribe(channelId, channelHandle);
@@ -958,7 +1381,21 @@
       dismissVideoCard(latestMeta.videoId, cardEl);
     });
 
-    // 2. Botão "Não tenho interesse" (Sem interesse)
+    // 2. Botão "Ver depois"
+    const watchLaterBtn = document.createElement('button');
+    watchLaterBtn.type = 'button';
+    watchLaterBtn.className = 'zerosub-btn zerosub-btn-watch-later';
+    watchLaterBtn.title = 'Salvar na fila Ver depois e limpar do feed';
+    watchLaterBtn.innerHTML = '<span class="zerosub-icon">🕒</span><span>Ver depois</span>';
+
+    watchLaterBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const latestMeta = inspectCardElement(cardEl);
+      saveVideoToWatchLater(latestMeta, cardEl);
+    });
+
+    // 3. Botão "Não tenho interesse" (Sem interesse)
     const notInterestedBtn = document.createElement('button');
     notInterestedBtn.type = 'button';
     notInterestedBtn.className = 'zerosub-btn zerosub-btn-not-interested';
@@ -972,7 +1409,7 @@
       markVideoNotInterested(latestMeta, cardEl);
     });
 
-    // 3. Botão "Desinscrever" com confirmação em duas etapas
+    // 4. Botão "Desinscrever" com confirmação em duas etapas
     const unsubBtn = document.createElement('button');
     unsubBtn.type = 'button';
     unsubBtn.className = 'zerosub-btn zerosub-btn-unsub';
@@ -1001,7 +1438,9 @@
       confirmController.trigger();
     });
 
+    // Grade 2x2: linha superior (Visto, Ver depois), linha inferior (Sem interesse, Desinscrever)
     actionBar.appendChild(markSeenBtn);
+    actionBar.appendChild(watchLaterBtn);
     actionBar.appendChild(notInterestedBtn);
     actionBar.appendChild(unsubBtn);
 
@@ -1030,6 +1469,7 @@
           <span id="zerosub-toolbar-status" class="zerosub-toolbar-status"></span>
         </div>
         <div class="zerosub-toolbar-actions">
+          <button type="button" id="zerosub-watch-later-toggle-btn" class="zerosub-toolbar-btn zerosub-toolbar-btn-watch-later zerosub-hidden"></button>
           <button type="button" id="zerosub-suggestions-toggle-btn" class="zerosub-toolbar-btn zerosub-toolbar-btn-suggestions zerosub-hidden"></button>
           <button type="button" id="zerosub-toggle-mode-btn" class="zerosub-toolbar-btn"></button>
           <button type="button" id="zerosub-reset-now-btn" class="zerosub-toolbar-btn zerosub-toolbar-btn-primary">
@@ -1045,9 +1485,17 @@
 
       targetParent.insertBefore(toolbar, targetParent.firstChild);
 
+      const watchLaterBtn = toolbar.querySelector('#zerosub-watch-later-toggle-btn');
       const suggestionsBtn = toolbar.querySelector('#zerosub-suggestions-toggle-btn');
       const toggleBtn = toolbar.querySelector('#zerosub-toggle-mode-btn');
       const resetBtn = toolbar.querySelector('#zerosub-reset-now-btn');
+
+      if (watchLaterBtn) {
+        watchLaterBtn.addEventListener('click', () => {
+          runtimeState.watchLaterPanelOpen = !runtimeState.watchLaterPanelOpen;
+          renderWatchLaterPanel();
+        });
+      }
 
       if (suggestionsBtn) {
         suggestionsBtn.addEventListener('click', () => {
@@ -1071,11 +1519,168 @@
     }
 
     updateToolbarUI();
-    renderSuggestionsPanel();
+  }
+
+  /**
+   * Renderiza o painel expansível "Ver depois" logo abaixo da barra do ZeroSub.
+   * Usa data-zerosub-render-key para não destruir botões em confirmação de 2 cliques.
+   */
+  function renderWatchLaterPanel() {
+    if (typeof document === 'undefined' || !isSubscriptionsPage()) return;
+    const toolbar = document.getElementById('zerosub-top-toolbar');
+    if (!toolbar || !toolbar.parentNode) return;
+
+    const items = Array.isArray(runtimeState.watchLaterVideos) ? runtimeState.watchLaterVideos : [];
+    let panel = document.getElementById('zerosub-watch-later-panel');
+
+    if (items.length === 0 || !runtimeState.watchLaterPanelOpen) {
+      if (panel) panel.remove();
+      if (items.length === 0) {
+        runtimeState.watchLaterPanelOpen = false;
+      }
+      return;
+    }
+
+    const renderKey = items
+      .map((item) => `${item.videoId || ''}:${item.savedAt || 0}`)
+      .join('|');
+
+    if (panel && panel.getAttribute('data-zerosub-render-key') === renderKey) {
+      return;
+    }
+
+    if (!panel) {
+      panel = document.createElement('div');
+      panel.id = 'zerosub-watch-later-panel';
+      panel.className = 'zerosub-watch-later-panel';
+      toolbar.parentNode.insertBefore(panel, toolbar.nextSibling);
+    }
+
+    panel.setAttribute('data-zerosub-render-key', renderKey);
+    panel.innerHTML = '';
+
+    const header = document.createElement('div');
+    header.className = 'zerosub-suggestions-header';
+    header.innerHTML = `
+      <div>
+        <div class="zerosub-suggestions-title">Ver depois (${items.length})</div>
+        <div class="zerosub-suggestions-subtitle">Vídeos salvos para assistir depois — somem automaticamente ao assistir &gt;90%</div>
+      </div>
+    `;
+    panel.appendChild(header);
+
+    const gridEl = document.createElement('div');
+    gridEl.className = 'zerosub-watch-later-grid';
+
+    items.forEach((item) => {
+      const watchUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(item.videoId)}`;
+      const card = document.createElement('div');
+      card.className = 'zerosub-wl-card';
+      card.setAttribute('data-video-id', item.videoId);
+
+      const thumbLink = document.createElement('a');
+      thumbLink.className = 'zerosub-wl-thumb-link';
+      thumbLink.href = watchUrl;
+      thumbLink.title = item.title || 'Assistir vídeo';
+
+      const thumbImg = document.createElement('img');
+      thumbImg.className = 'zerosub-wl-thumb';
+      thumbImg.src = item.thumbnailUrl || buildVideoThumbnailUrl(item.videoId);
+      thumbImg.alt = item.title || 'Thumbnail do vídeo';
+      thumbImg.loading = 'lazy';
+      thumbLink.appendChild(thumbImg);
+
+      if (item.durationText) {
+        const durBadge = document.createElement('span');
+        durBadge.className = 'zerosub-wl-duration';
+        durBadge.textContent = item.durationText;
+        thumbLink.appendChild(durBadge);
+      }
+
+      const meta = document.createElement('div');
+      meta.className = 'zerosub-wl-meta';
+
+      const titleLink = document.createElement('a');
+      titleLink.className = 'zerosub-wl-title';
+      titleLink.href = watchUrl;
+      titleLink.textContent = item.title || `Vídeo ${item.videoId}`;
+      titleLink.title = item.title || item.videoId;
+
+      const channelEl = document.createElement('div');
+      channelEl.className = 'zerosub-wl-channel';
+      channelEl.textContent = item.channelName || item.channelHandle || item.channelKey || '';
+
+      meta.appendChild(titleLink);
+      meta.appendChild(channelEl);
+
+      const actions = document.createElement('div');
+      actions.className = 'zerosub-wl-actions';
+
+      const seenBtn = document.createElement('button');
+      seenBtn.type = 'button';
+      seenBtn.className = 'zerosub-btn zerosub-btn-seen';
+      seenBtn.title = 'Marcar como visto e remover de Ver depois';
+      seenBtn.innerHTML = '<span class="zerosub-icon">✓</span><span>Visto</span>';
+      seenBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        markWatchLaterVideoSeen(item);
+      });
+
+      const notIntBtn = document.createElement('button');
+      notIntBtn.type = 'button';
+      notIntBtn.className = 'zerosub-btn zerosub-btn-not-interested';
+      notIntBtn.title = 'Não tenho interesse (3 vídeos diferentes sugerem desinscrição)';
+      notIntBtn.innerHTML = '<span class="zerosub-icon">✕</span><span>Sem interesse</span>';
+      notIntBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        markWatchLaterVideoNotInterested(item);
+      });
+
+      const unsubBtn = document.createElement('button');
+      unsubBtn.type = 'button';
+      unsubBtn.className = 'zerosub-btn zerosub-btn-unsub';
+      unsubBtn.title = 'Cancelar inscrição deste canal (clique duas vezes para confirmar)';
+      unsubBtn.textContent = 'Desinscrever';
+
+      const confirmController = createTwoStepConfirmation({
+        timeoutMs: CONFIRM_TIMEOUT_MS,
+        onEnterConfirm() {
+          unsubBtn.textContent = 'Confirmar?';
+          unsubBtn.classList.add('zerosub-btn-confirming');
+        },
+        onReset() {
+          unsubBtn.textContent = 'Desinscrever';
+          unsubBtn.classList.remove('zerosub-btn-confirming');
+        },
+        onConfirmed() {
+          handleConfirmedUnsubscribe(item, unsubBtn);
+        }
+      });
+
+      unsubBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        confirmController.trigger();
+      });
+
+      actions.appendChild(seenBtn);
+      actions.appendChild(notIntBtn);
+      actions.appendChild(unsubBtn);
+
+      card.appendChild(thumbLink);
+      card.appendChild(meta);
+      card.appendChild(actions);
+      gridEl.appendChild(card);
+    });
+
+    panel.appendChild(gridEl);
   }
 
   /**
    * Renderiza o painel expansível de sugestões de desinscrição logo abaixo da barra do ZeroSub.
+   * Usa uma chave de assinatura para evitar destruir/recriar os botões quando a lista não mudou.
    */
   function renderSuggestionsPanel() {
     if (typeof document === 'undefined' || !isSubscriptionsPage()) return;
@@ -1096,13 +1701,23 @@
       return;
     }
 
+    const renderKey = suggestions
+      .map((entry) => `${entry.channelKey || ''}:${entry.channelName || ''}:${entry.videoIds.length}`)
+      .join('|');
+
+    if (panel && panel.getAttribute('data-zerosub-render-key') === renderKey) {
+      return;
+    }
+
     if (!panel) {
       panel = document.createElement('div');
       panel.id = 'zerosub-suggestions-panel';
       panel.className = 'zerosub-suggestions-panel';
-      toolbar.parentNode.insertBefore(panel, toolbar.nextSibling);
+      const anchorEl = document.getElementById('zerosub-watch-later-panel') || toolbar;
+      anchorEl.parentNode.insertBefore(panel, anchorEl.nextSibling);
     }
 
+    panel.setAttribute('data-zerosub-render-key', renderKey);
     panel.innerHTML = '';
 
     const header = document.createElement('div');
@@ -1143,7 +1758,9 @@
       keepBtn.type = 'button';
       keepBtn.className = 'zerosub-toolbar-btn';
       keepBtn.textContent = 'Manter canal';
-      keepBtn.addEventListener('click', () => {
+      keepBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
         keepSuggestedChannel(entry);
       });
 
@@ -1151,7 +1768,9 @@
       unsubBtn.type = 'button';
       unsubBtn.className = 'zerosub-toolbar-btn zerosub-toolbar-btn-primary';
       unsubBtn.textContent = 'Desinscrever';
-      unsubBtn.addEventListener('click', () => {
+      unsubBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
         handleConfirmedUnsubscribe(entry, unsubBtn);
       });
 
@@ -1167,26 +1786,49 @@
   }
 
   /**
+   * Retorna os cards de vídeo do feed principal (Grid clássico, Rich Grid ou Lista),
+   * excluindo apenas cards dentro de prateleiras exclusivas de Shorts.
+   * @param {Element} browseRoot
+   * @returns {Element[]}
+   */
+  function queryFeedVideoCards(browseRoot) {
+    if (!browseRoot) return [];
+    return Array.from(
+      browseRoot.querySelectorAll(
+        'ytd-rich-item-renderer, ytd-grid-video-renderer, ytd-video-renderer'
+      )
+    ).filter((card) => !card.closest('[data-zerosub-shorts-shelf="true"], ytd-reel-shelf-renderer'));
+  }
+
+  /**
    * Redefine o installTimestamp para Date.now(), registra os IDs âncora do topo (baselineAnchorIds)
    * e dispensa os vídeos atualmente renderizados na fila para garantir corte definitivo do feed.
    */
   async function resetFeedToNow() {
     const now = Date.now();
     runtimeState.installTimestamp = now;
+    runtimeState.lastClearedAt = now;
     runtimeState.zeroSubEnabled = true;
 
-    const allCards = document.querySelectorAll(
-      'ytd-browse[page-subtype="subscriptions"] ytd-rich-item-renderer, ytd-browse[page-subtype="subscriptions"] ytd-grid-video-renderer'
-    );
+    const browseRoot = document.querySelector('ytd-browse[page-subtype="subscriptions"]');
+    const allCards = queryFeedVideoCards(browseRoot);
+    const watchLaterIds = getWatchLaterIdSet(runtimeState.watchLaterVideos);
     const anchorIds = [];
 
     allCards.forEach((card) => {
       const meta = inspectCardElement(card);
       if (meta.videoId) {
-        if (anchorIds.length < MAX_BASELINE_ANCHORS && !anchorIds.includes(meta.videoId)) {
+        const isRegularChronological = !meta.isLiveNow && !meta.isUpcoming && !meta.isShort;
+        if (
+          isRegularChronological &&
+          anchorIds.length < MAX_BASELINE_ANCHORS &&
+          !anchorIds.includes(meta.videoId)
+        ) {
           anchorIds.push(meta.videoId);
         }
-        runtimeState.dismissedVideos.add(meta.videoId);
+        if (!watchLaterIds.has(meta.videoId)) {
+          runtimeState.dismissedVideos.add(meta.videoId);
+        }
       }
     });
 
@@ -1196,6 +1838,7 @@
     if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
       await chrome.storage.local.set({
         installTimestamp: now,
+        lastClearedAt: now,
         zeroSubEnabled: true,
         baselineAnchorIds: anchorIds,
         dismissedVideos: dismissedArray,
@@ -1217,6 +1860,7 @@
 
     const statusEl = toolbar.querySelector('#zerosub-toolbar-status');
     const toggleBtn = toolbar.querySelector('#zerosub-toggle-mode-btn');
+    const watchLaterBtn = toolbar.querySelector('#zerosub-watch-later-toggle-btn');
     const suggestionsBtn = toolbar.querySelector('#zerosub-suggestions-toggle-btn');
 
     const dateFormatted = new Date(runtimeState.installTimestamp).toLocaleString('pt-BR', {
@@ -1241,6 +1885,18 @@
       toggleBtn.classList.toggle('zerosub-mode-off', !runtimeState.zeroSubEnabled);
     }
 
+    if (watchLaterBtn) {
+      const wlCount = Array.isArray(runtimeState.watchLaterVideos)
+        ? runtimeState.watchLaterVideos.length
+        : 0;
+      if (wlCount > 0) {
+        watchLaterBtn.textContent = `🕒 Ver depois (${wlCount})`;
+        watchLaterBtn.classList.remove('zerosub-hidden');
+      } else {
+        watchLaterBtn.classList.add('zerosub-hidden');
+      }
+    }
+
     if (suggestionsBtn) {
       const suggestions = getUnsubscribeSuggestions(
         runtimeState.notInterestedByChannel,
@@ -1259,12 +1915,13 @@
    * Exibe ou oculta o banner de estado vazio "Inbox Zero" quando não restarem vídeos pendentes.
    * @param {Element} browseRoot
    * @param {number} visibleCount
+   * @param {number} totalCards
    */
-  function ensureEmptyStateBanner(browseRoot, visibleCount) {
+  function ensureEmptyStateBanner(browseRoot, visibleCount, totalCards = 0) {
     if (typeof document === 'undefined' || !browseRoot) return;
     let wrapper = browseRoot.querySelector('#zerosub-empty-wrapper');
 
-    const isEmpty = Boolean(runtimeState.zeroSubEnabled && visibleCount === 0);
+    const isEmpty = shouldShowEmptyState(runtimeState.zeroSubEnabled, visibleCount, totalCards);
     browseRoot.classList.toggle('zerosub-feed-empty', isEmpty);
 
     if (!isEmpty) {
@@ -1272,7 +1929,9 @@
       return;
     }
 
-    const dateFormatted = new Date(runtimeState.installTimestamp).toLocaleString('pt-BR', {
+    const clearedTimestamp = getDisplayClearedTimestamp(runtimeState);
+
+    const dateFormatted = new Date(clearedTimestamp).toLocaleString('pt-BR', {
       day: '2-digit',
       month: '2-digit',
       hour: '2-digit',
@@ -1292,6 +1951,7 @@
         <div class="zerosub-empty-title">Inbox Zero! Nenhum vídeo novo pendente</div>
         <div id="zerosub-empty-subtitle" class="zerosub-empty-subtitle"></div>
         <div class="zerosub-empty-actions">
+          <button type="button" id="zerosub-empty-watch-later-btn" class="zerosub-toolbar-btn zerosub-toolbar-btn-watch-later zerosub-hidden"></button>
           <button type="button" id="zerosub-check-new-btn" class="zerosub-toolbar-btn zerosub-toolbar-btn-primary">
             Verificar novos vídeos
           </button>
@@ -1305,6 +1965,7 @@
 
       const anchorEl =
         document.getElementById('zerosub-suggestions-panel') ||
+        document.getElementById('zerosub-watch-later-panel') ||
         document.getElementById('zerosub-top-toolbar');
       if (anchorEl && anchorEl.parentNode) {
         anchorEl.parentNode.insertBefore(wrapper, anchorEl.nextSibling);
@@ -1312,16 +1973,36 @@
         browseRoot.appendChild(wrapper);
       }
 
+      const emptyWatchLaterBtn = banner.querySelector('#zerosub-empty-watch-later-btn');
       const checkNewBtn = banner.querySelector('#zerosub-check-new-btn');
       const showAllBtn = banner.querySelector('#zerosub-empty-show-all-btn');
 
+      if (emptyWatchLaterBtn) {
+        emptyWatchLaterBtn.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          runtimeState.watchLaterPanelOpen = true;
+          renderWatchLaterPanel();
+          const wlPanel = document.getElementById('zerosub-watch-later-panel');
+          if (wlPanel && typeof wlPanel.scrollIntoView === 'function') {
+            wlPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          }
+        });
+      }
+
       if (checkNewBtn) {
-        checkNewBtn.addEventListener('click', () => {
+        checkNewBtn.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          checkNewBtn.disabled = true;
+          checkNewBtn.textContent = 'Verificando...';
           window.location.reload();
         });
       }
       if (showAllBtn) {
-        showAllBtn.addEventListener('click', async () => {
+        showAllBtn.addEventListener('click', async (e) => {
+          e.preventDefault();
+          e.stopPropagation();
           runtimeState.zeroSubEnabled = false;
           if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
             await chrome.storage.local.set({ zeroSubEnabled: false });
@@ -1331,9 +2012,25 @@
       }
     }
 
+    const wlCount = Array.isArray(runtimeState.watchLaterVideos)
+      ? runtimeState.watchLaterVideos.length
+      : 0;
     const subtitleEl = wrapper.querySelector('#zerosub-empty-subtitle');
     if (subtitleEl) {
-      subtitleEl.textContent = `Sua fila está limpa desde ${dateFormatted}. Vídeos antigos permanecem ocultos.`;
+      subtitleEl.textContent =
+        wlCount > 0
+          ? `Sua fila está limpa desde ${dateFormatted}. Você ainda tem ${wlCount} vídeo(s) salvo(s) em Ver depois.`
+          : `Sua fila está limpa desde ${dateFormatted}. Vídeos antigos permanecem ocultos.`;
+    }
+
+    const emptyWatchLaterBtn = wrapper.querySelector('#zerosub-empty-watch-later-btn');
+    if (emptyWatchLaterBtn) {
+      if (wlCount > 0) {
+        emptyWatchLaterBtn.textContent = `🕒 Abrir Ver depois (${wlCount})`;
+        emptyWatchLaterBtn.classList.remove('zerosub-hidden');
+      } else {
+        emptyWatchLaterBtn.classList.add('zerosub-hidden');
+      }
     }
   }
 
@@ -1385,29 +2082,32 @@
     const browseRoot = document.querySelector('ytd-browse[page-subtype="subscriptions"]');
     if (!browseRoot) return;
 
-    // 1. Filtra seções inteiras de Shorts (prateleiras de Shorts no feed de inscrições)
+    // 1. Filtra seções exclusivas de Shorts (sem ocultar seções que contêm vídeos normais como "Mais recentes" / "Mais relevantes")
     const richSections = browseRoot.querySelectorAll(
       'ytd-rich-section-renderer, ytd-reel-shelf-renderer'
     );
     richSections.forEach((section) => {
+      const hasRegularVideoLinks = Boolean(section.querySelector('a[href*="/watch?v="]'));
       const isShortsShelf =
         section.tagName.toLowerCase() === 'ytd-reel-shelf-renderer' ||
         Boolean(
-          section.querySelector(
-            'ytd-rich-shelf-renderer[is-shorts], ytd-reel-shelf-renderer, a[href*="/shorts/"]'
-          )
-        );
+          section.querySelector('ytd-rich-shelf-renderer[is-shorts], ytd-reel-shelf-renderer')
+        ) ||
+        (!hasRegularVideoLinks &&
+          Boolean(section.querySelector('a[href*="/shorts/"], ytm-shorts-lockup-view-model')));
 
       if (isShortsShelf) {
+        section.setAttribute('data-zerosub-shorts-shelf', 'true');
         const shouldHideShelf = runtimeState.zeroSubEnabled && runtimeState.hideShorts;
         section.classList.toggle('zerosub-hidden', shouldHideShelf);
+      } else {
+        section.removeAttribute('data-zerosub-shorts-shelf');
+        section.classList.remove('zerosub-hidden');
       }
     });
 
-    // 2. Avalia todos os cards em ordem cronológica (com corte definitivo a partir do Marco Zero/âncora)
-    const cards = Array.from(
-      browseRoot.querySelectorAll('ytd-rich-item-renderer, ytd-grid-video-renderer')
-    );
+    // 2. Avalia todos os cards do feed principal (Grid ou Lista), excluindo prateleiras exclusivas de Shorts
+    const cards = queryFeedVideoCards(browseRoot);
     const cardsMeta = cards.map((card) => inspectCardElement(card));
     const { decisions, visibleCount, shouldHideContinuation } = evaluateFeedItems(
       cardsMeta,
@@ -1436,13 +2136,43 @@
       item.classList.toggle('zerosub-hidden', shouldHideContinuation);
     });
 
-    runtimeState.pendingCount = visibleCount;
+    browseRoot.setAttribute('data-zerosub-total-cards', String(cards.length));
+    browseRoot.setAttribute('data-zerosub-visible-cards', String(visibleCount));
+
+    const prevPendingCount = runtimeState.pendingCount;
+    const nextClearedAt = resolveClearedTimestamp({
+      zeroSubEnabled: runtimeState.zeroSubEnabled,
+      prevPendingCount,
+      nextPendingCount: visibleCount,
+      totalCards: cards.length,
+      currentLastClearedAt: runtimeState.lastClearedAt,
+      installTimestamp: runtimeState.installTimestamp
+    });
+    const clearedAtChanged = nextClearedAt !== runtimeState.lastClearedAt;
+    if (clearedAtChanged) {
+      runtimeState.lastClearedAt = nextClearedAt;
+    }
+
+    if (cards.length > 0) {
+      runtimeState.pendingCount = visibleCount;
+    }
     updateToolbarUI();
+    renderWatchLaterPanel();
     renderSuggestionsPanel();
-    ensureEmptyStateBanner(browseRoot, visibleCount);
+    ensureEmptyStateBanner(browseRoot, visibleCount, cards.length);
 
     if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-      chrome.storage.local.set({ pendingCount: visibleCount });
+      const storagePatch = {};
+      if (cards.length > 0 && visibleCount !== lastPersistedPendingCount) {
+        lastPersistedPendingCount = visibleCount;
+        storagePatch.pendingCount = visibleCount;
+      }
+      if (clearedAtChanged && typeof runtimeState.lastClearedAt === 'number') {
+        storagePatch.lastClearedAt = runtimeState.lastClearedAt;
+      }
+      if (Object.keys(storagePatch).length > 0) {
+        chrome.storage.local.set(storagePatch);
+      }
     }
   }
 
@@ -1454,15 +2184,41 @@
     const browseRoot = document.querySelector('ytd-browse[page-subtype="subscriptions"]');
     if (!browseRoot) return;
 
-    const visibleCards = browseRoot.querySelectorAll(
-      'ytd-rich-item-renderer:not(.zerosub-hidden), ytd-grid-video-renderer:not(.zerosub-hidden)'
-    );
-    runtimeState.pendingCount = visibleCards.length;
+    const allCards = queryFeedVideoCards(browseRoot);
+    const visibleCards = allCards.filter((card) => !card.classList.contains('zerosub-hidden'));
+
+    const prevPendingCount = runtimeState.pendingCount;
+    const nextClearedAt = resolveClearedTimestamp({
+      zeroSubEnabled: runtimeState.zeroSubEnabled,
+      prevPendingCount,
+      nextPendingCount: visibleCards.length,
+      totalCards: allCards.length,
+      currentLastClearedAt: runtimeState.lastClearedAt,
+      installTimestamp: runtimeState.installTimestamp
+    });
+    const clearedAtChanged = nextClearedAt !== runtimeState.lastClearedAt;
+    if (clearedAtChanged) {
+      runtimeState.lastClearedAt = nextClearedAt;
+    }
+
+    if (allCards.length > 0) {
+      runtimeState.pendingCount = visibleCards.length;
+    }
     updateToolbarUI();
-    ensureEmptyStateBanner(browseRoot, visibleCards.length);
+    ensureEmptyStateBanner(browseRoot, visibleCards.length, allCards.length);
 
     if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-      chrome.storage.local.set({ pendingCount: visibleCards.length });
+      const storagePatch = {};
+      if (allCards.length > 0 && visibleCards.length !== lastPersistedPendingCount) {
+        lastPersistedPendingCount = visibleCards.length;
+        storagePatch.pendingCount = visibleCards.length;
+      }
+      if (clearedAtChanged && typeof runtimeState.lastClearedAt === 'number') {
+        storagePatch.lastClearedAt = runtimeState.lastClearedAt;
+      }
+      if (Object.keys(storagePatch).length > 0) {
+        chrome.storage.local.set(storagePatch);
+      }
     }
   }
 
@@ -1501,9 +2257,15 @@
     feedObserver = new MutationObserver((mutations) => {
       if (!isSubscriptionsPage()) return;
       for (const mutation of mutations) {
+        if (isZeroSubOwnedNode(mutation.target)) continue;
         if (mutation.addedNodes && mutation.addedNodes.length > 0) {
-          scheduleFeedScan();
-          break;
+          const hasExternalAddedNode = Array.from(mutation.addedNodes).some(
+            (node) => !isZeroSubOwnedNode(node)
+          );
+          if (hasExternalAddedNode) {
+            scheduleFeedScan();
+            break;
+          }
         }
       }
     });
@@ -1530,15 +2292,29 @@
       if (shouldAutoMarkWatched(videoEl.currentTime, videoEl.duration)) {
         const currentVideoId = extractVideoIdFromHref(location.href);
         if (!currentVideoId || currentVideoId === lastAutoMarkedVideoId) return;
-        if (runtimeState.dismissedVideos.has(currentVideoId)) return;
+
+        const isInWatchLater = getWatchLaterIdSet(runtimeState.watchLaterVideos).has(currentVideoId);
+        if (runtimeState.dismissedVideos.has(currentVideoId) && !isInWatchLater) return;
 
         lastAutoMarkedVideoId = currentVideoId;
         runtimeState.dismissedVideos.add(currentVideoId);
+        if (isInWatchLater) {
+          runtimeState.watchLaterVideos = removeWatchLaterVideo(
+            runtimeState.watchLaterVideos,
+            currentVideoId
+          );
+        }
 
         if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-          const data = await chrome.storage.local.get(['dismissedVideos']);
-          const updated = appendDismissedVideo(data.dismissedVideos || [], currentVideoId);
-          await chrome.storage.local.set({ dismissedVideos: updated });
+          const data = await chrome.storage.local.get(['dismissedVideos', 'watchLaterVideos']);
+          const updatedDismissed = appendDismissedVideo(data.dismissedVideos || [], currentVideoId);
+          const payload = { dismissedVideos: updatedDismissed };
+          const storedWatchLater = Array.isArray(data.watchLaterVideos) ? data.watchLaterVideos : [];
+          if (getWatchLaterIdSet(storedWatchLater).has(currentVideoId)) {
+            payload.watchLaterVideos = removeWatchLaterVideo(storedWatchLater, currentVideoId);
+            runtimeState.watchLaterVideos = payload.watchLaterVideos;
+          }
+          await chrome.storage.local.set(payload);
         }
       }
     });
@@ -1597,6 +2373,13 @@
           runtimeState.installTimestamp = changes.installTimestamp.newValue;
           needsRescan = true;
         }
+        if (changes.lastClearedAt !== undefined) {
+          runtimeState.lastClearedAt =
+            typeof changes.lastClearedAt.newValue === 'number'
+              ? changes.lastClearedAt.newValue
+              : null;
+          needsRescan = true;
+        }
         if (changes.zeroSubEnabled !== undefined) {
           runtimeState.zeroSubEnabled = changes.zeroSubEnabled.newValue !== false;
           needsRescan = true;
@@ -1614,6 +2397,12 @@
         }
         if (changes.dismissedVideos !== undefined) {
           runtimeState.dismissedVideos = new Set(changes.dismissedVideos.newValue || []);
+          needsRescan = true;
+        }
+        if (changes.watchLaterVideos !== undefined) {
+          runtimeState.watchLaterVideos = Array.isArray(changes.watchLaterVideos.newValue)
+            ? changes.watchLaterVideos.newValue
+            : [];
           needsRescan = true;
         }
         if (changes.unsubscribedChannels !== undefined) {
@@ -1695,11 +2484,20 @@
       isScheduledLiveText,
       evaluateCardVisibility,
       evaluateFeedItems,
+      isZeroSubOwnedNode,
+      shouldShowEmptyState,
+      resolveClearedTimestamp,
+      getDisplayClearedTimestamp,
       recordNotInterestedVideo,
       getUnsubscribeSuggestions,
       removeChannelFromNotInterested,
       shouldAutoMarkWatched,
       appendDismissedVideo,
+      buildVideoThumbnailUrl,
+      getWatchLaterIdSet,
+      upsertWatchLaterVideo,
+      removeWatchLaterVideo,
+      removeChannelFromWatchLater,
       createTwoStepConfirmation
     };
   } else if (rootScope) {
@@ -1710,11 +2508,20 @@
       isScheduledLiveText,
       evaluateCardVisibility,
       evaluateFeedItems,
+      isZeroSubOwnedNode,
+      shouldShowEmptyState,
+      resolveClearedTimestamp,
+      getDisplayClearedTimestamp,
       recordNotInterestedVideo,
       getUnsubscribeSuggestions,
       removeChannelFromNotInterested,
       shouldAutoMarkWatched,
       appendDismissedVideo,
+      buildVideoThumbnailUrl,
+      getWatchLaterIdSet,
+      upsertWatchLaterVideo,
+      removeWatchLaterVideo,
+      removeChannelFromWatchLater,
       createTwoStepConfirmation
     };
   }

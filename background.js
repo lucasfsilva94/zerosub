@@ -9,9 +9,11 @@ const DEFAULT_STATE = {
   hideScheduledLives: true,
   autoMarkWatched: true,
   dismissedVideos: [],
+  watchLaterVideos: [],
   unsubscribedChannels: [],
   baselineAnchorIds: [],
   notInterestedByChannel: {},
+  lastClearedAt: null,
   pendingCount: 0
 };
 
@@ -65,12 +67,14 @@ async function ensureInitialState(storageArea, now = Date.now()) {
 }
 
 /**
- * Atualiza o badge da extensão com a quantidade de vídeos pendentes.
+ * Atualiza o badge da extensão com a quantidade de vídeos pendentes
+ * ou, quando a fila principal estiver zerada, com o lembrete azul de "Ver depois".
  *
  * @param {number} count
- * @param {boolean} enabled
+ * @param {boolean} [enabled=true]
+ * @param {number} [watchLaterCount=0]
  */
-function updateActionBadge(count, enabled = true) {
+function updateActionBadge(count, enabled = true, watchLaterCount = 0) {
   if (typeof chrome === 'undefined' || !chrome.action) return;
 
   if (!enabled) {
@@ -80,18 +84,30 @@ function updateActionBadge(count, enabled = true) {
   }
 
   const numericCount = Number(count) || 0;
-  const text = numericCount > 0 ? (numericCount > 99 ? '99+' : String(numericCount)) : '';
-  chrome.action.setBadgeText({ text });
   if (numericCount > 0) {
+    const text = numericCount > 99 ? '99+' : String(numericCount);
+    chrome.action.setBadgeText({ text });
     chrome.action.setBadgeBackgroundColor({ color: '#cc0000' });
+    return;
   }
+
+  const numericWatchLater = Number(watchLaterCount) || 0;
+  if (numericWatchLater > 0) {
+    const text = numericWatchLater > 99 ? '99+' : String(numericWatchLater);
+    chrome.action.setBadgeText({ text });
+    chrome.action.setBadgeBackgroundColor({ color: '#1a73e8' });
+    return;
+  }
+
+  chrome.action.setBadgeText({ text: '' });
 }
 
 if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onInstalled) {
   chrome.runtime.onInstalled.addListener(async () => {
     try {
       const state = await ensureInitialState(chrome.storage.local);
-      updateActionBadge(state.pendingCount, state.zeroSubEnabled);
+      const watchLaterCount = Array.isArray(state.watchLaterVideos) ? state.watchLaterVideos.length : 0;
+      updateActionBadge(state.pendingCount, state.zeroSubEnabled, watchLaterCount);
     } catch (err) {
       console.error('[ZeroSub] Falha ao inicializar estado no onInstalled:', err);
     }
@@ -100,9 +116,10 @@ if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onInstalle
   if (chrome.storage && chrome.storage.onChanged) {
     chrome.storage.onChanged.addListener((changes, areaName) => {
       if (areaName !== 'local') return;
-      if (changes.pendingCount || changes.zeroSubEnabled) {
-        chrome.storage.local.get(['pendingCount', 'zeroSubEnabled']).then((data) => {
-          updateActionBadge(data.pendingCount, data.zeroSubEnabled !== false);
+      if (changes.pendingCount || changes.zeroSubEnabled || changes.watchLaterVideos) {
+        chrome.storage.local.get(['pendingCount', 'zeroSubEnabled', 'watchLaterVideos']).then((data) => {
+          const watchLaterCount = Array.isArray(data.watchLaterVideos) ? data.watchLaterVideos.length : 0;
+          updateActionBadge(data.pendingCount, data.zeroSubEnabled !== false, watchLaterCount);
         });
       }
     });

@@ -21,7 +21,7 @@
 }
 
 body {
-  width: 320px;
+  width: 360px;
   background-color: var(--bg-main);
   color: var(--text-main);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
@@ -70,16 +70,30 @@ body {
   color: var(--text-muted);
 }
 
+.counters-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
 .counter-card {
   background-color: var(--bg-card);
   border: 1px solid var(--border-subtle);
   border-radius: 12px;
-  padding: 16px 12px;
+  padding: 12px 10px;
   text-align: center;
 }
 
+.counter-card-watch-later {
+  border-color: rgba(62, 166, 255, 0.32);
+}
+
+.counter-card-watch-later .counter-value {
+  color: #65b8ff;
+}
+
 .counter-value {
-  font-size: 34px;
+  font-size: 28px;
   font-weight: 700;
   line-height: 1.1;
   color: var(--text-main);
@@ -87,7 +101,7 @@ body {
 
 .counter-label {
   margin-top: 4px;
-  font-size: 12px;
+  font-size: 11px;
   color: var(--text-muted);
 }
 
@@ -135,7 +149,8 @@ body {
 }
 
 .settings-section,
-.suggestions-section {
+.suggestions-section,
+.watch-later-section {
   background-color: var(--bg-card);
   border: 1px solid var(--border-subtle);
   border-radius: 10px;
@@ -145,8 +160,157 @@ body {
   gap: 8px;
 }
 
-.suggestions-section[hidden] {
+.suggestions-section[hidden],
+.watch-later-section[hidden] {
   display: none;
+}
+
+.watch-later-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.watch-later-badge {
+  background-color: rgba(62, 166, 255, 0.2);
+  color: #65b8ff;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 7px;
+  border-radius: 10px;
+}
+
+.watch-later-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.wl-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  background-color: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border-subtle);
+}
+
+.wl-item-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.wl-thumb-link {
+  position: relative;
+  display: block;
+  width: 80px;
+  height: 45px;
+  border-radius: 5px;
+  overflow: hidden;
+  flex-shrink: 0;
+  background-color: #000000;
+}
+
+.wl-thumb {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.wl-duration {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background-color: rgba(0, 0, 0, 0.82);
+  color: #ffffff;
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.wl-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.wl-title {
+  color: var(--text-main);
+  text-decoration: none;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.25;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.wl-title:hover {
+  text-decoration: underline;
+}
+
+.wl-channel {
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wl-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.wl-actions .btn-mini {
+  flex: 1 1 0;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.btn-mini-seen {
+  background-color: rgba(46, 204, 113, 0.16);
+  color: #58d68d;
+}
+
+.btn-mini-seen:hover {
+  background-color: rgba(46, 204, 113, 0.28);
+}
+
+.btn-mini-not-int {
+  background-color: rgba(243, 156, 18, 0.16);
+  color: #f5b041;
+}
+
+.btn-mini-not-int:hover {
+  background-color: rgba(243, 156, 18, 0.28);
+}
+
+.btn-mini-unsub-neutral {
+  background-color: rgba(255, 255, 255, 0.08);
+  color: var(--text-muted);
+}
+
+.btn-mini-unsub-neutral:hover {
+  background-color: rgba(255, 255, 255, 0.16);
+  color: var(--text-main);
+}
+
+.btn-mini-confirming {
+  background-color: var(--accent-red) !important;
+  color: #ffffff !important;
 }
 
 .suggestions-header {

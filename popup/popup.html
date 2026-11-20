@@ -16,9 +16,15 @@
       <span id="baseline-label" class="baseline-label" title="Marco Zero atual">--</span>
     </header>
 
-    <section class="counter-card">
-      <div id="pending-count" class="counter-value">0</div>
-      <div class="counter-label">vídeos pendentes na fila</div>
+    <section class="counters-grid">
+      <div class="counter-card">
+        <div id="pending-count" class="counter-value">0</div>
+        <div class="counter-label">na fila</div>
+      </div>
+      <div class="counter-card counter-card-watch-later">
+        <div id="watch-later-count" class="counter-value">0</div>
+        <div class="counter-label">ver depois</div>
+      </div>
     </section>
 
     <section class="actions-section">
@@ -28,6 +34,14 @@
       <button type="button" id="btn-restore-hidden" class="btn btn-secondary">
         Restaurar vídeos ocultos (<span id="dismissed-count">0</span>)
       </button>
+    </section>
+
+    <section id="watch-later-section" class="watch-later-section" hidden>
+      <div class="watch-later-header">
+        <h2 class="section-title">Ver depois</h2>
+        <span id="watch-later-badge" class="watch-later-badge">0</span>
+      </div>
+      <div id="watch-later-list" class="watch-later-list"></div>
     </section>
 
     <section id="suggestions-section" class="suggestions-section" hidden>

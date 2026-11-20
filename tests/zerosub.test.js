@@ -6,7 +6,8 @@ const path = require('node:path');
 const {
   DEFAULT_STATE,
   buildInitialStatePatch,
-  ensureInitialState
+  ensureInitialState,
+  updateActionBadge
 } = require('../background.js');
 
 const {
@@ -22,11 +23,20 @@ const {
   isScheduledLiveText,
   evaluateCardVisibility,
   evaluateFeedItems,
+  isZeroSubOwnedNode,
+  shouldShowEmptyState,
+  resolveClearedTimestamp,
+  getDisplayClearedTimestamp,
   recordNotInterestedVideo,
   getUnsubscribeSuggestions,
   removeChannelFromNotInterested,
   shouldAutoMarkWatched,
   appendDismissedVideo,
+  buildVideoThumbnailUrl,
+  getWatchLaterIdSet,
+  upsertWatchLaterVideo,
+  removeWatchLaterVideo,
+  removeChannelFromWatchLater,
   createTwoStepConfirmation
 } = require('../content/content.js');
 
@@ -35,7 +45,11 @@ const {
   restoreDismissedVideos,
   formatBaselineTimestamp,
   getPopupSuggestions,
-  keepChannelInStorage
+  keepChannelInStorage,
+  markWatchLaterAsSeenInStorage,
+  markWatchLaterNotInterestedInStorage,
+  removeChannelFromWatchLaterInStorage,
+  createPopupTwoStepConfirmation
 } = require('../popup/popup.js');
 
 test('1.1 manifest.json é um JSON Manifest V3 válido com scripts e permissões exigidos', () => {
@@ -615,6 +629,497 @@ test('6.4 styles.css e popup suportam novo rodapé de 3 botões em linha única,
 
   await keepChannelInStorage(mockStorage, { channelKey: 'UC_X' });
   assert.equal(getPopupSuggestions(store.notInterestedByChannel, []).length, 0);
+});
+
+test('6.5 evaluateFeedItems não dispara corte prematuro em lives/Shorts no topo e shouldShowEmptyState aguarda hidratação do grid', () => {
+  const baseline = 1763590000000;
+  const state = {
+    installTimestamp: baseline,
+    zeroSubEnabled: true,
+    hideShorts: true,
+    hideScheduledLives: true,
+    dismissedVideos: new Set(['live_now_pinned']),
+    unsubscribedChannels: new Set(),
+    baselineAnchorIds: new Set(['live_now_pinned', 'vid_anchor_regular'])
+  };
+
+  const feed = [
+    // Live em andamento fixada no topo pelo YouTube (já estava em baselineAnchorIds)
+    { videoId: 'live_now_pinned', publishedTimestamp: baseline - 3600000, isShort: false, isUpcoming: false, isLiveNow: true },
+    // Short antigo no topo também não deve disparar cutoff
+    { videoId: 'short_old', publishedTimestamp: baseline - 120000, isShort: true, isUpcoming: false, isLiveNow: false },
+    // Vídeo novo publicado após o marco zero DEVE ficar visível!
+    { videoId: 'vid_new_after_live', publishedTimestamp: baseline + 300000, isShort: false, isUpcoming: false, isLiveNow: false },
+    // Primeiro vídeo regular âncora dispara o cutoff
+    { videoId: 'vid_anchor_regular', publishedTimestamp: baseline - 60000, isShort: false, isUpcoming: false, isLiveNow: false },
+    // Tudo abaixo do âncora regular é ocultado
+    { videoId: 'vid_below_anchor', publishedTimestamp: null, isShort: false, isUpcoming: false, isLiveNow: false }
+  ];
+
+  const result = evaluateFeedItems(feed, state);
+  assert.equal(result.visibleCount, 1);
+  assert.equal(result.cutoffReached, true);
+  assert.deepEqual(result.decisions[0], { hidden: true, reason: 'baseline-anchor' });
+  assert.deepEqual(result.decisions[1], { hidden: true, reason: 'short' });
+  assert.deepEqual(result.decisions[2], { hidden: false, reason: null });
+  assert.deepEqual(result.decisions[3], { hidden: true, reason: 'baseline-anchor' });
+  assert.deepEqual(result.decisions[4], { hidden: true, reason: 'after-cutoff' });
+
+  // Estado vazio só aparece quando o grid já renderizou cards (totalCards > 0)
+  assert.equal(shouldShowEmptyState(true, 0, 0), false);
+  assert.equal(shouldShowEmptyState(true, 0, 5), true);
+  assert.equal(shouldShowEmptyState(true, 1, 5), false);
+  assert.equal(shouldShowEmptyState(false, 0, 5), false);
+
+  // isZeroSubOwnedNode identifica nós internos da UI da extensão (evitando loop no MutationObserver)
+  const ownedNode = {
+    nodeType: 1,
+    closest: (selector) => (selector.includes('#zerosub-suggestions-panel') ? {} : null)
+  };
+  const externalNode = {
+    nodeType: 1,
+    closest: () => null
+  };
+  assert.equal(isZeroSubOwnedNode(ownedNode), true);
+  assert.equal(isZeroSubOwnedNode(externalNode), false);
+});
+
+test('6.6 evaluateFeedItems exibe vídeo explicitamente novo mesmo abaixo de seção antiga ("Mais relevantes") e injector detecta live/agora mesmo em lockupViewModel', () => {
+  const baseline = 1763590000000;
+  const state = {
+    installTimestamp: baseline,
+    zeroSubEnabled: true,
+    hideShorts: true,
+    hideScheduledLives: true,
+    dismissedVideos: new Set(),
+    unsubscribedChannels: new Set(),
+    baselineAnchorIds: new Set(['vid_anchor'])
+  };
+
+  const feed = [
+    // Card antigo na seção "Mais relevantes" no topo do feed
+    { videoId: 'vid_relevant_old', publishedTimestamp: baseline - 86400000, isShort: false, isUpcoming: false, isLiveNow: false },
+    // Vídeo novo na seção "Mais recentes" abaixo de "Mais relevantes" DEVE aparecer!
+    { videoId: 'vid_new_latest', publishedTimestamp: baseline + 600000, isShort: false, isUpcoming: false, isLiveNow: false },
+    // Vídeo âncora do último reset continua oculto
+    { videoId: 'vid_anchor', publishedTimestamp: baseline + 1000, isShort: false, isUpcoming: false, isLiveNow: false },
+    // Vídeo antigo sem timestamp abaixo do corte continua oculto
+    { videoId: 'vid_old_unknown', publishedTimestamp: null, isShort: false, isUpcoming: false, isLiveNow: false }
+  ];
+
+  const result = evaluateFeedItems(feed, state);
+  assert.equal(result.visibleCount, 1);
+  assert.deepEqual(result.decisions[0], { hidden: true, reason: 'before-baseline' });
+  assert.deepEqual(result.decisions[1], { hidden: false, reason: null });
+  assert.deepEqual(result.decisions[2], { hidden: true, reason: 'baseline-anchor' });
+  assert.deepEqual(result.decisions[3], { hidden: true, reason: 'after-cutoff' });
+
+  // Verifica extração de lockupViewModel para live e "agora mesmo"
+  const lockupPayload = {
+    items: [
+      {
+        lockupViewModel: {
+          contentId: 'vid_lockup_new',
+          metadata: {
+            lockupMetadataViewModel: {
+              metadata: {
+                contentMetadataViewModel: {
+                  metadataRows: [
+                    { metadataParts: [{ text: { content: 'agora mesmo' } }] }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        lockupViewModel: {
+          contentId: 'vid_lockup_live',
+          contentImage: {
+            thumbnailViewModel: {
+              overlays: [
+                {
+                  thumbnailBottomOverlayViewModel: {
+                    badges: [
+                      {
+                        thumbnailBadgeViewModel: {
+                          badgeStyle: 'THUMBNAIL_OVERLAY_BADGE_STYLE_LIVE',
+                          text: 'AO VIVO'
+                        }
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    ]
+  };
+
+  const extracted = extractVideosFromYtData(lockupPayload);
+  const newItem = extracted.find((v) => v.videoId === 'vid_lockup_new');
+  const liveItem = extracted.find((v) => v.videoId === 'vid_lockup_live');
+  assert.equal(newItem.publishedTimeText, 'agora mesmo');
+  assert.equal(liveItem.isLive, true);
+});
+
+test('7.1 background.js inicializa watchLaterVideos sem sobrescrever existentes e exibe badge azul quando fila principal está zerada', () => {
+  const patch = buildInitialStatePatch({}, 1763600000000);
+  assert.deepEqual(patch.watchLaterVideos, []);
+
+  const updatePatch = buildInitialStatePatch(
+    {
+      installTimestamp: 1000,
+      watchLaterVideos: [{ videoId: 'wl_1', title: 'Salvo' }]
+    },
+    2000
+  );
+  assert.equal(updatePatch.watchLaterVideos, undefined);
+
+  // Testa prioridade do badge em chrome.action
+  const badgeCalls = [];
+  const prevChrome = global.chrome;
+  global.chrome = {
+    action: {
+      setBadgeText(arg) {
+        badgeCalls.push({ type: 'text', value: arg.text });
+      },
+      setBadgeBackgroundColor(arg) {
+        badgeCalls.push({ type: 'color', value: arg.color });
+      }
+    }
+  };
+
+  try {
+    // 1. Modo desligado -> OFF cinza
+    badgeCalls.length = 0;
+    updateActionBadge(5, false, 3);
+    assert.deepEqual(badgeCalls, [
+      { type: 'text', value: 'OFF' },
+      { type: 'color', value: '#717171' }
+    ]);
+
+    // 2. Fila principal > 0 tem prioridade em vermelho
+    badgeCalls.length = 0;
+    updateActionBadge(4, true, 7);
+    assert.deepEqual(badgeCalls, [
+      { type: 'text', value: '4' },
+      { type: 'color', value: '#cc0000' }
+    ]);
+
+    // 3. Fila principal === 0 e Ver depois > 0 -> azul de lembrete
+    badgeCalls.length = 0;
+    updateActionBadge(0, true, 7);
+    assert.deepEqual(badgeCalls, [
+      { type: 'text', value: '7' },
+      { type: 'color', value: '#1a73e8' }
+    ]);
+
+    // 4. Cap 99+ para Ver depois
+    badgeCalls.length = 0;
+    updateActionBadge(0, true, 120);
+    assert.deepEqual(badgeCalls, [
+      { type: 'text', value: '99+' },
+      { type: 'color', value: '#1a73e8' }
+    ]);
+
+    // 5. Tudo zerado -> badge vazio
+    badgeCalls.length = 0;
+    updateActionBadge(0, true, 0);
+    assert.deepEqual(badgeCalls, [{ type: 'text', value: '' }]);
+  } finally {
+    global.chrome = prevChrome;
+  }
+});
+
+test('7.2 injector.js extrai title e durationText tanto de videoRenderer clássico quanto de lockupViewModel', () => {
+  const payload = {
+    items: [
+      {
+        videoRenderer: {
+          videoId: 'classic_vid_1',
+          title: { runs: [{ text: 'Como usar OpenSpec' }] },
+          lengthText: { simpleText: '14:22' },
+          publishedTimeText: { simpleText: 'há 1 hora' }
+        }
+      },
+      {
+        lockupViewModel: {
+          contentId: 'lockup_vid_2',
+          metadata: {
+            lockupMetadataViewModel: {
+              title: { content: 'Guia Completo de Chrome MV3' }
+            }
+          },
+          contentImage: {
+            thumbnailViewModel: {
+              overlays: [
+                {
+                  thumbnailBottomOverlayViewModel: {
+                    badges: [
+                      {
+                        thumbnailBadgeViewModel: {
+                          badgeStyle: 'THUMBNAIL_OVERLAY_BADGE_STYLE_DEFAULT',
+                          text: '1:05:10'
+                        }
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    ]
+  };
+
+  const extracted = extractVideosFromYtData(payload);
+  const v1 = extracted.find((v) => v.videoId === 'classic_vid_1');
+  const v2 = extracted.find((v) => v.videoId === 'lockup_vid_2');
+
+  assert.equal(v1.title, 'Como usar OpenSpec');
+  assert.equal(v1.durationText, '14:22');
+  assert.equal(v2.title, 'Guia Completo de Chrome MV3');
+  assert.equal(v2.durationText, '1:05:10');
+});
+
+test('7.3 helpers de watchLaterVideos, evaluateCardVisibility e isZeroSubOwnedNode operam de forma isolada de dismissedVideos', () => {
+  let list = [];
+  list = upsertWatchLaterVideo(
+    list,
+    {
+      videoId: 'wl_a',
+      title: 'Vídeo A',
+      durationText: '10:00',
+      channelId: 'UC_A',
+      channelHandle: '/@canala',
+      channelKey: 'UC_A',
+      channelName: 'Canal A'
+    },
+    1000
+  );
+  list = upsertWatchLaterVideo(
+    list,
+    {
+      videoId: 'wl_b',
+      title: 'Vídeo B',
+      channelId: 'UC_B',
+      channelKey: 'UC_B',
+      channelName: 'Canal B'
+    },
+    2000
+  );
+
+  // Mais recente fica no topo e gera thumbnail determinística
+  assert.equal(list.length, 2);
+  assert.equal(list[0].videoId, 'wl_b');
+  assert.equal(list[0].thumbnailUrl, buildVideoThumbnailUrl('wl_b'));
+
+  // Re-inserir wl_a deduplica e move para o topo preservando metadados ausentes
+  list = upsertWatchLaterVideo(list, { videoId: 'wl_a' }, 3000);
+  assert.equal(list.length, 2);
+  assert.equal(list[0].videoId, 'wl_a');
+  assert.equal(list[0].title, 'Vídeo A');
+  assert.equal(list[0].durationText, '10:00');
+
+  const idSet = getWatchLaterIdSet(list);
+  assert.equal(idSet.has('wl_a'), true);
+  assert.equal(idSet.has('wl_b'), true);
+
+  // evaluateCardVisibility oculta vídeo em Ver depois no Modo ZeroSub com reason 'watch-later'
+  const baseline = 1763600000000;
+  const state = {
+    installTimestamp: baseline,
+    zeroSubEnabled: true,
+    hideShorts: true,
+    hideScheduledLives: true,
+    dismissedVideos: new Set(),
+    watchLaterVideos: list,
+    unsubscribedChannels: new Set()
+  };
+
+  assert.deepEqual(
+    evaluateCardVisibility(
+      { videoId: 'wl_a', publishedTimestamp: baseline + 5000, isShort: false, isUpcoming: false },
+      state
+    ),
+    { hidden: true, reason: 'watch-later' }
+  );
+
+  // No modo Mostrar todos, volta a exibir no feed
+  assert.deepEqual(
+    evaluateCardVisibility(
+      { videoId: 'wl_a', publishedTimestamp: baseline + 5000, isShort: false, isUpcoming: false },
+      { ...state, zeroSubEnabled: false }
+    ),
+    { hidden: false, reason: null }
+  );
+
+  // Remoção por videoId e por canal
+  const withoutB = removeWatchLaterVideo(list, 'wl_b');
+  assert.deepEqual(withoutB.map((v) => v.videoId), ['wl_a']);
+
+  const withoutChannelA = removeChannelFromWatchLater(list, { channelId: 'UC_A' });
+  assert.deepEqual(withoutChannelA.map((v) => v.videoId), ['wl_b']);
+
+  // Painel Ver depois reconhecido como nó interno do ZeroSub (não dispara MutationObserver)
+  const wlPanelNode = {
+    nodeType: 1,
+    closest: (selector) => (selector.includes('#zerosub-watch-later-panel') ? {} : null)
+  };
+  assert.equal(isZeroSubOwnedNode(wlPanelNode), true);
+});
+
+test('7.4 styles.css (grade 2x2 e painel Ver depois) e popup (contadores e ações de Ver depois) funcionam de ponta a ponta', async () => {
+  const cssContent = fs.readFileSync(path.join(__dirname, '..', 'content', 'styles.css'), 'utf8');
+  assert.ok(cssContent.includes('grid-template-columns: repeat(2, minmax(0, 1fr))'));
+  assert.ok(cssContent.includes('.zerosub-btn-watch-later'));
+  assert.ok(cssContent.includes('.zerosub-watch-later-panel'));
+  assert.ok(cssContent.includes('--zerosub-watch-later-bg'));
+
+  const popupHtml = fs.readFileSync(path.join(__dirname, '..', 'popup', 'popup.html'), 'utf8');
+  assert.ok(popupHtml.includes('id="watch-later-count"'));
+  assert.ok(popupHtml.includes('id="watch-later-section"'));
+  assert.ok(popupHtml.includes('id="watch-later-badge"'));
+  assert.ok(popupHtml.includes('id="watch-later-list"'));
+
+  let store = {
+    watchLaterVideos: [
+      { videoId: 'v1', title: 'Vídeo 1', channelKey: 'UC_1', channelId: 'UC_1', channelName: 'Canal 1' },
+      { videoId: 'v2', title: 'Vídeo 2', channelKey: 'UC_1', channelId: 'UC_1', channelName: 'Canal 1' },
+      { videoId: 'v3', title: 'Vídeo 3', channelKey: 'UC_2', channelId: 'UC_2', channelName: 'Canal 2' }
+    ],
+    dismissedVideos: [],
+    notInterestedByChannel: {
+      UC_1: {
+        channelKey: 'UC_1',
+        channelId: 'UC_1',
+        channelName: 'Canal 1',
+        videoIds: ['old_1', 'old_2'],
+        updatedAt: 100
+      }
+    }
+  };
+
+  const mockStorage = {
+    async get(keys) {
+      const res = {};
+      for (const k of keys) res[k] = store[k];
+      return res;
+    },
+    async set(obj) {
+      store = { ...store, ...obj };
+    }
+  };
+
+  // Restaurar vídeos ocultos e zerar fila preservam watchLaterVideos
+  await restoreDismissedVideos(mockStorage);
+  await resetZeroSubQueue(mockStorage, 9999);
+  assert.equal(store.watchLaterVideos.length, 3);
+
+  // 1. Marcar v3 como Visto pelo popup
+  await markWatchLaterAsSeenInStorage(mockStorage, 'v3');
+  assert.deepEqual(store.watchLaterVideos.map((v) => v.videoId), ['v1', 'v2']);
+  assert.ok(store.dismissedVideos.includes('v3'));
+
+  // 2. Marcar v1 como Sem interesse pelo popup -> 3º vídeo de UC_1 atinge threshold de sugestão!
+  const notIntRes = await markWatchLaterNotInterestedInStorage(
+    mockStorage,
+    store.watchLaterVideos[0],
+    500
+  );
+  assert.equal(notIntRes.reachedThreshold, true);
+  assert.equal(notIntRes.count, 3);
+  assert.deepEqual(store.watchLaterVideos.map((v) => v.videoId), ['v2']);
+  assert.ok(store.dismissedVideos.includes('v1'));
+  assert.equal(getPopupSuggestions(store.notInterestedByChannel, []).length, 1);
+
+  // 3. Remover canal UC_1 de watchLaterVideos ao desinscrever
+  await removeChannelFromWatchLaterInStorage(mockStorage, { channelId: 'UC_1' });
+  assert.equal(store.watchLaterVideos.length, 0);
+
+  // 4. Confirmação em 2 cliques no popup
+  let confirmed = 0;
+  const ctrl = createPopupTwoStepConfirmation({
+    timeoutMs: 50,
+    onConfirmed() {
+      confirmed++;
+    }
+  });
+  assert.equal(ctrl.trigger(), 'confirming');
+  assert.equal(confirmed, 0);
+  assert.equal(ctrl.trigger(), 'confirmed');
+  assert.equal(confirmed, 1);
+});
+
+test('7.5 resolveClearedTimestamp registra o horário real em que a fila zera via triagem sem sobrescrever em reloads', () => {
+  const baseline = 1763595120000; // 20:32
+  const clearedNow = 1763599140000; // 21:39
+  const reloadLater = 1763599500000; // 21:45
+
+  // 1. Fila tinha 1 vídeo e o usuário limpou agora (1 -> 0): registra 21:39
+  const t1 = resolveClearedTimestamp({
+    zeroSubEnabled: true,
+    prevPendingCount: 1,
+    nextPendingCount: 0,
+    totalCards: 10,
+    currentLastClearedAt: null,
+    installTimestamp: baseline,
+    now: clearedNow
+  });
+  assert.equal(t1, clearedNow);
+
+  // 2. Recarrega a página às 21:45 com a fila ainda zerada (0 -> 0): mantém 21:39
+  const t2 = resolveClearedTimestamp({
+    zeroSubEnabled: true,
+    prevPendingCount: 0,
+    nextPendingCount: 0,
+    totalCards: 10,
+    currentLastClearedAt: t1,
+    installTimestamp: baseline,
+    now: reloadLater
+  });
+  assert.equal(t2, clearedNow);
+
+  // 3. Enquanto o grid ainda não hidratou (totalCards === 0): preserva valor atual
+  const t3 = resolveClearedTimestamp({
+    zeroSubEnabled: true,
+    prevPendingCount: 2,
+    nextPendingCount: 0,
+    totalCards: 0,
+    currentLastClearedAt: baseline,
+    installTimestamp: baseline,
+    now: reloadLater
+  });
+  assert.equal(t3, baseline);
+
+  // 4. Se chegou vídeo novo (0 -> 1) e depois usuário limpou novamente às 21:45 (1 -> 0): atualiza para 21:45
+  const t4 = resolveClearedTimestamp({
+    zeroSubEnabled: true,
+    prevPendingCount: 1,
+    nextPendingCount: 0,
+    totalCards: 10,
+    currentLastClearedAt: clearedNow,
+    installTimestamp: baseline,
+    now: reloadLater
+  });
+  assert.equal(t4, reloadLater);
+
+  // 5. getDisplayClearedTimestamp recupera o horário real do último item salvo em Ver depois
+  //    mesmo quando lastClearedAt ainda estava nulo ou igual ao Marco Zero antigo
+  assert.equal(
+    getDisplayClearedTimestamp({
+      installTimestamp: baseline,
+      lastClearedAt: baseline,
+      watchLaterVideos: [{ videoId: 'wl_1', savedAt: clearedNow }],
+      notInterestedByChannel: {}
+    }),
+    clearedNow
+  );
 });
 
 
