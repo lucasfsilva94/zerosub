@@ -221,6 +221,11 @@
       return { hidden: false, reason: null };
     }
 
+    // Cards vazios/fantasmas sem videoId (ex: posts, skeletons ou slots reciclados do YouTube) nunca contam como pendentes
+    if (!cardMeta.videoId) {
+      return { hidden: true, reason: 'no-video-id' };
+    }
+
     const dismissedSet =
       state.dismissedVideos instanceof Set
         ? state.dismissedVideos
@@ -1786,8 +1791,101 @@
   }
 
   /**
-   * Retorna os cards de vídeo do feed principal (Grid clássico, Rich Grid ou Lista),
-   * excluindo apenas cards dentro de prateleiras exclusivas de Shorts.
+   * Verifica se um elemento de card (ou algum ancestral dentro do grid, antes de ytd-rich-grid-renderer)
+   * está oculto nativamente pelo YouTube (ex: itens colapsados `[hidden]` em shelves ou templates reciclados),
+   * sem confundir com o ocultamento do grid feito pelo próprio estado vazio `.zerosub-feed-empty`.
+   *
+   * @param {Element} card
+   * @param {Element | null} browseRoot
+   * @returns {boolean}
+   */
+  function isElementNativelyHidden(card, browseRoot) {
+    let el = card;
+    while (el && el !== browseRoot) {
+      const tag = el.tagName ? el.tagName.toLowerCase() : '';
+      if (tag === 'ytd-rich-grid-renderer' || tag === 'ytd-section-list-renderer') {
+        break;
+      }
+
+      if (
+        el.hidden === true ||
+        (typeof el.hasAttribute === 'function' &&
+          (el.hasAttribute('hidden') || el.hasAttribute('is-hidden')))
+      ) {
+        return true;
+      }
+
+      if (el.style && el.style.display === 'none') {
+        return true;
+      }
+
+      if (el !== card && el.classList && el.classList.contains('zerosub-hidden')) {
+        return true;
+      }
+
+      if (typeof getComputedStyle === 'function') {
+        const isSelfHiddenByZeroSub =
+          el === card && el.classList && el.classList.contains('zerosub-hidden');
+        if (!isSelfHiddenByZeroSub) {
+          try {
+            const computed = getComputedStyle(el);
+            if (computed && (computed.display === 'none' || computed.visibility === 'hidden')) {
+              return true;
+            }
+          } catch (_) {
+            // Ignora nós desconectados
+          }
+        }
+      }
+
+      el = el.parentElement;
+    }
+    return false;
+  }
+
+  /**
+   * Determina se um elemento do DOM é um card real e elegível do feed principal de inscrições
+   * (descarta itens em prateleiras de Shorts, cards aninhados, nós ocultos nativamente pelo YouTube
+   * e slots vazios/posts sem link de vídeo).
+   *
+   * @param {Element} card
+   * @param {Element | null} browseRoot
+   * @returns {boolean}
+   */
+  function isCardEligibleForFeed(card, browseRoot) {
+    if (!card || card.nodeType !== 1) return false;
+
+    if (
+      typeof card.closest === 'function' &&
+      card.closest(
+        '[data-zerosub-shorts-shelf="true"], ytd-reel-shelf-renderer, ytd-rich-shelf-renderer[is-shorts]'
+      )
+    ) {
+      return false;
+    }
+
+    if (
+      card.parentElement &&
+      typeof card.parentElement.closest === 'function' &&
+      card.parentElement.closest('ytd-rich-item-renderer, ytd-grid-video-renderer, ytd-video-renderer')
+    ) {
+      return false;
+    }
+
+    if (isElementNativelyHidden(card, browseRoot)) {
+      return false;
+    }
+
+    const hasVideoLink =
+      typeof card.querySelector === 'function' &&
+      Boolean(card.querySelector('a[href*="/watch?v="], a[href*="/shorts/"]'));
+
+    return hasVideoLink;
+  }
+
+  /**
+   * Retorna os cards de vídeo reais do feed principal (Grid clássico, Rich Grid ou Lista),
+   * excluindo prateleiras de Shorts, cards aninhados, itens ocultos nativamente pelo YouTube e slots sem vídeo.
    * @param {Element} browseRoot
    * @returns {Element[]}
    */
@@ -1797,7 +1895,7 @@
       browseRoot.querySelectorAll(
         'ytd-rich-item-renderer, ytd-grid-video-renderer, ytd-video-renderer'
       )
-    ).filter((card) => !card.closest('[data-zerosub-shorts-shelf="true"], ytd-reel-shelf-renderer'));
+    ).filter((card) => isCardEligibleForFeed(card, browseRoot));
   }
 
   /**
@@ -2485,6 +2583,8 @@
       evaluateCardVisibility,
       evaluateFeedItems,
       isZeroSubOwnedNode,
+      isElementNativelyHidden,
+      isCardEligibleForFeed,
       shouldShowEmptyState,
       resolveClearedTimestamp,
       getDisplayClearedTimestamp,
@@ -2509,6 +2609,8 @@
       evaluateCardVisibility,
       evaluateFeedItems,
       isZeroSubOwnedNode,
+      isElementNativelyHidden,
+      isCardEligibleForFeed,
       shouldShowEmptyState,
       resolveClearedTimestamp,
       getDisplayClearedTimestamp,

@@ -24,6 +24,8 @@ const {
   evaluateCardVisibility,
   evaluateFeedItems,
   isZeroSubOwnedNode,
+  isElementNativelyHidden,
+  isCardEligibleForFeed,
   shouldShowEmptyState,
   resolveClearedTimestamp,
   getDisplayClearedTimestamp,
@@ -1120,6 +1122,80 @@ test('7.5 resolveClearedTimestamp registra o horário real em que a fila zera vi
     }),
     clearedNow
   );
+});
+
+test('7.6 cards fantasmas (sem videoId, ocultos nativamente pelo YouTube ou aninhados) não inflam pendingCount nem bloqueiam Inbox Zero', () => {
+  const baseline = 1763600000000;
+  const state = {
+    installTimestamp: baseline,
+    zeroSubEnabled: true,
+    hideShorts: true,
+    hideScheduledLives: true,
+    dismissedVideos: new Set(),
+    watchLaterVideos: [],
+    unsubscribedChannels: new Set()
+  };
+
+  // Card sem videoId (ex: post/skeleton/slot vazio) deve ser ocultado/ignorado no Modo ZeroSub
+  assert.deepEqual(
+    evaluateCardVisibility(
+      { videoId: '', publishedTimestamp: null, isShort: false, isUpcoming: false },
+      state
+    ),
+    { hidden: true, reason: 'no-video-id' }
+  );
+
+  const browseRoot = { tagName: 'YTD-BROWSE' };
+  const grid = { tagName: 'YTD-RICH-GRID-RENDERER', parentElement: browseRoot };
+
+  const makeEl = (overrides = {}) => ({
+    nodeType: 1,
+    tagName: 'YTD-RICH-ITEM-RENDERER',
+    hidden: false,
+    style: {},
+    classList: { contains: () => false },
+    hasAttribute: () => false,
+    closest: () => null,
+    querySelector: (sel) => (sel.includes('/watch?v=') ? {} : null),
+    parentElement: grid,
+    ...overrides
+  });
+
+  // 1. Card normal visível com link de vídeo -> elegível
+  const validCard = makeEl();
+  assert.equal(isCardEligibleForFeed(validCard, browseRoot), true);
+
+  // 2. Card oculto nativamente pelo YouTube ([hidden]) -> NÃO elegível
+  const hiddenCard = makeEl({
+    hidden: true,
+    hasAttribute: (attr) => attr === 'hidden'
+  });
+  assert.equal(isElementNativelyHidden(hiddenCard, browseRoot), true);
+  assert.equal(isCardEligibleForFeed(hiddenCard, browseRoot), false);
+
+  // 3. Card dentro de ancestral oculto pelo YouTube (ex: shelf colapsada) -> NÃO elegível
+  const hiddenParent = makeEl({
+    tagName: 'DIV',
+    hasAttribute: (attr) => attr === 'hidden',
+    parentElement: grid
+  });
+  const cardInHiddenParent = makeEl({ parentElement: hiddenParent });
+  assert.equal(isCardEligibleForFeed(cardInHiddenParent, browseRoot), false);
+
+  // 4. Card vazio / community post sem link de vídeo -> NÃO elegível
+  const ghostCard = makeEl({ querySelector: () => null });
+  assert.equal(isCardEligibleForFeed(ghostCard, browseRoot), false);
+
+  // 5. Card aninhado dentro de outro card -> NÃO elegível
+  const nestedParent = { closest: () => ({}) };
+  const nestedCard = makeEl({ parentElement: nestedParent });
+  assert.equal(isCardEligibleForFeed(nestedCard, browseRoot), false);
+
+  // 6. Card dentro de prateleira de Shorts -> NÃO elegível
+  const shortsShelfCard = makeEl({
+    closest: (sel) => (sel.includes('ytd-rich-shelf-renderer[is-shorts]') ? {} : null)
+  });
+  assert.equal(isCardEligibleForFeed(shortsShelfCard, browseRoot), false);
 });
 
 

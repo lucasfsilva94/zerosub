@@ -150,6 +150,10 @@ html[dark] {
   background-color: var(--zerosub-bg-surface) !important;
 }
 
+.zerosub-card-managed[hidden] {
+  display: none !important;
+}
+
 .zerosub-card-managed > #content {
   width: 100% !important;
   display: flex !important;
